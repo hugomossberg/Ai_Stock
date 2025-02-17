@@ -1,7 +1,7 @@
 import json
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
-
+import yfinance as yf
 from chatgpt_client import chat_gpt
 
 reminders = []
@@ -48,6 +48,22 @@ async def chat_response(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     response = chat_gpt(user_message)  # Skicka till OpenAI API
     await update.message.reply_text(response)  # Skicka tillbaka svaret till chatten
 
+
+
+async def stock_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if len(context.args) == 0:
+        await update.message.reply_text("Använd: /stock <TICKER>")
+        return
+
+    ticker = context.args[0].upper()
+    stock = yf.Ticker(ticker)
+
+    try:
+        price = stock.history(period="1d")["Close"].iloc[-1]
+        await update.message.reply_text(f"Senaste pris för {ticker}: {price:.2f} USD")
+    except IndexError:
+        await update.message.reply_text("Kunde inte hämta data, kontrollera att du angav rätt ticker.")
+
     
 
 
@@ -60,6 +76,8 @@ def main():
     app.add_handler(CommandHandler("start", Start))
     app.add_handler(CommandHandler("remind", add_remind))
     app.add_handler(CommandHandler("list", display_reminds))
+    app.add_handler(CommandHandler("stock", stock_price))
+
 
 
     
@@ -67,6 +85,5 @@ def main():
     app.run_polling()
 
 if __name__ == "__main__":
-
     main()
 
