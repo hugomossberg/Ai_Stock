@@ -2,3 +2,4 @@ python-telegram-bot
 yfinance
 openai
 python-dotenv
+ib_insync
