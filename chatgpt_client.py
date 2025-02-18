@@ -1,8 +1,10 @@
 import openai
 import os 
+from dotenv import load_dotenv
 
-API_KEY = "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"
+load_dotenv()
 
+API_KEY = os.getenv("CHATGPT_API")
 def chat_gpt(user_message):
     try:
         client = openai.OpenAI(api_key=API_KEY)  # Ange API-nyckeln här

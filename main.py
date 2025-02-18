@@ -1,8 +1,17 @@
 import json
+import os
+from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
 import yfinance as yf
 from chatgpt_client import chat_gpt
+
+load_dotenv()
+
+
+
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+print(f"TELEGRAM_TOKEN: {TELEGRAM_TOKEN}")
 
 reminders = []
 def save_reminders():
@@ -70,7 +79,7 @@ async def stock_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 def main():
     load_reminders()
 
-    app = ApplicationBuilder().token("7589907637:AAFN5ZuDZ5PoRdzJLsBhvKF1BBZoJLd4mgw").build()
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     
     app.add_handler(CommandHandler("deletelist", delete_reminds))
     app.add_handler(CommandHandler("start", Start))
