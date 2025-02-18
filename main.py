@@ -11,7 +11,7 @@ load_dotenv()
 
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-print(f"TELEGRAM_TOKEN: {TELEGRAM_TOKEN}")
+
 
 reminders = []
 def save_reminders():
