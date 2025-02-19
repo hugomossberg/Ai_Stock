@@ -1,26 +1,40 @@
-import os
-from dotenv import load_dotenv
-from ib_insync import *
 import time
-import yfinance as yf
-import pandas as pd
-
-load_dotenv()
+from ib_insync import IB, ScannerSubscription
 
 
 class IbClient:
     def __init__(self):
         self.ib = IB()
-        self.ib.connect("127.0.0.1", 4002, clientId=1)
-        self.df = pd.read_csv("S&P500.csv")
 
-        print("api Connceted!")
+    async def connect(self):
+        """Ansluter asynkront till IBKR API."""
+        await self.ib.connectAsync("127.0.0.1", 4001, clientId=1, timeout=30)
+        print("✅ API Connected!")
 
-    def get_stocks(self):
-        self.tickers = self.df["Symbol"].tolist()
-        return self.tickers
+    def scanner_parameters(self):
+        """Hämtar scanner-parametrar från IBKR och sparar i en XML-fil."""
+        scanner_xml = self.ib.reqScannerParameters()  # Synkront anrop
+        with open("scanner_parameters.xml", "w", encoding="utf-8") as file:
+            file.write(scanner_xml)
+        print("✅ Scanner parameters saved!")
+
+    async def get_stocks(self):
+        """Hämtar aktier från IBKR scanner."""
+        subscription = ScannerSubscription(
+            instrument="STK", locationCode="STK.US", scanCode="TOP_OPEN_PERC_GAIN"
+        )
+        scan_data = await self.ib.reqScannerDataAsync(subscription)
+        if not scan_data:
+            print("⚠️ Ingen scanner-data returnerad! Kontrollera IBKR API.")
+            return []
+        tickers = [data.contractDetails.contract.symbol for data in scan_data]
+        print(f"✅ Hämtade {len(tickers)} aktier: {tickers}")
+        return tickers
 
     def disconnect_ibkr(self):
-        time.sleep(2)
+        """Stänger IBKR API-anslutningen."""
+        time.sleep(
+            2
+        )  # OBS: time.sleep() blockerar event loopen; överväg asyncio.sleep() om det behövs.
         self.ib.disconnect()
-        print("api Disconnected!")
+        print("❌ API Disconnected!")
