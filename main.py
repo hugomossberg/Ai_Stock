@@ -9,6 +9,7 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+from yfinance_stock import analyse_stock
 import nest_asyncio
 
 load_dotenv()
@@ -18,6 +19,9 @@ nest_asyncio.apply()
 from chatgpt_client import chat_gpt
 from ibkr_client import IbClient
 
+import logging
+
+logging.getLogger("ib_insync").setLevel(logging.ERROR)
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 ib_client = None
@@ -55,10 +59,14 @@ async def disconnect_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def main():
     global ib_client
+
     ib_client = IbClient()
-    await ib_client.connect()  # Använd den asynkrona anslutningsmetoden
-    tickers = await ib_client.get_stocks()
-    ib_client.scanner_parameters()
+
+    # await ib_client.connect()
+
+    await analyse_stock()
+
+    # await ib_client.scanner_parameters()
 
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat_response))
@@ -69,7 +77,7 @@ async def main():
 
     await app.run_polling()  # Startar Telegram-boten
 
-    ib_client.disconnect_ibkr()
+    await ib_client.disconnect_ibkr()
 
 
 if __name__ == "__main__":

@@ -9,7 +9,7 @@ class IbClient:
 
     async def connect(self):
         """Ansluter asynkront till IBKR API."""
-        await self.ib.connectAsync("127.0.0.1", 4001, clientId=1, timeout=60)
+        await self.ib.connectAsync("127.0.0.1", 4001, clientId=1, timeout=30)
         print("✅ API Connected!")
 
     def scanner_parameters(self):
@@ -20,7 +20,6 @@ class IbClient:
         print("✅ Scanner parameters saved!")
 
     async def get_stocks(self):
-        """Hämtar aktier från IBKR scanner."""
         await asyncio.sleep(2)
 
         subscription = ScannerSubscription(
@@ -30,6 +29,7 @@ class IbClient:
         )
 
         scan_data = await self.ib.reqScannerDataAsync(subscription)
+
         if not scan_data:
             print("⚠️ Ingen scanner-data returnerad! Kontrollera IBKR API.")
             return []
