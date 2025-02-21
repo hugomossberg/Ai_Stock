@@ -1,4 +1,5 @@
 # main.py
+import re
 import os
 import json
 import asyncio
@@ -50,7 +51,8 @@ async def main():
 
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat_response))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, ask_ai_stock))
+    app.add_handler(MessageHandler(filters.ALL, ask_ai_stock))
+
     app.add_handler(CommandHandler("dc", disconnect_command))
 
     await app.run_polling()

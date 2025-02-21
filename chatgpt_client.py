@@ -21,9 +21,8 @@ API_KEY = os.getenv("CHATGPT_API")
 async def chat_gpt(user_message):
     try:
         client = openai.OpenAI(api_key=API_KEY)  # Ange API-nyckeln här
-
         response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
+            model="gpt-3.5-turbo",  # gpt-3.5-turbo
             messages=[
                 {
                     "role": "system",
@@ -51,32 +50,34 @@ async def chat_response(
 
 
 async def ask_ai_stock(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    json_open = open("Stock_info.json")
-    data = json.load(json_open)
+    print("🔵 ask_ai_stock har anropats!")  # 👀 Detta borde alltid synas
 
-    # Försök extrahera ett ord med endast stora bokstäver
+    with open("Stock_info.json", "r", encoding="utf-8") as json_open:
+        data = json.load(json_open)
+
+    # Försök extrahera en aktiesymbol från användarens text
     match = re.search(r"\b[A-Z]{2,}\b", update.message.text)
     if match:
         symbol = match.group(0)
     else:
         symbol = update.message.text.upper()
 
+    print(f"🔍 Extraherad symbol: {symbol}")
+    print(f"📃 Alla tillgängliga symboler: {[stock['symbol'] for stock in data]}")
+
+    # Kolla om symbolen finns i JSON
     for stock in data:
-        if stock["symbol"] == symbol:
+        if stock["symbol"].upper() == symbol:
+            print(f"✅ Match hittad för: {stock['symbol']}")
             await update.message.reply_text(f"Aktieinfo för {stock['name']}:")
             await update.message.reply_text(f"Latest Close: {stock['latestClose']}")
-            print("Kollar symbol:", stock["symbol"])
-            if stock["symbol"] == update.message.text.upper():
-                print("Match hittad för:", stock["symbol"])
-                ...
             return
 
-    await update.message.reply_text("Aktie med symbolen: " + symbol + " hittades inte.")
+    print(f"❌ Aktie med symbolen {symbol} hittades INTE i JSON!")
+
+    # Om aktien inte hittades, fråga ChatGPT istället
     try:
         response = await chat_gpt(update.message.text)
-        await update.message.reply_text(response)
         await update.message.reply_text(f"ChatGPT-svar: {response}")
-        return
     except Exception as e:
         await update.message.reply_text(f"Ett fel uppstod: {str(e)}")
-        return

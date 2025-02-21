@@ -9,7 +9,7 @@ class IbClient:
         self.ib = IB()
 
     async def connect(self):
-        await self.ib.connectAsync("127.0.0.1", 4001, clientId=1, timeout=60)
+        await self.ib.connectAsync("127.0.0.1", 4001, clientId=1, timeout=30)
         print("✅ API Connected!")
 
     async def get_stocks(self):
