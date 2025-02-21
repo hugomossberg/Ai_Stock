@@ -2,6 +2,9 @@
 import yfinance as yf
 import asyncio
 
+import pandas as pd
+import json
+
 
 async def analyse_stock(ib_client):
     # Använd den skickade ib_client-instansen (förväntas redan vara ansluten)
@@ -27,7 +30,7 @@ async def analyse_stock(ib_client):
             "daysHigh": info.get("daysHigh"),
             "52WeekLow": info.get("52WeekLow"),
             "52WeekHigh": info.get("52WeekHigh"),
-            "history": history_df,
+            "history": history_df.reset_index().to_dict(orient="records"),
         }
 
         print(f"Analyserar aktie: {stock_data['name']}")
@@ -40,6 +43,11 @@ async def analyse_stock(ib_client):
         print(f"52 Week High: {stock_data['52WeekHigh']}\n")
         results.append(stock_data)
 
-    # Exempel: om du vill hämta scanner-parametrar, gör det här
-    await ib_client.scanner_parameters()
+        # Exempel: om du vill hämta scanner-parametrar, gör det här
+        # await ib_client.scanner_parameters()
+
+    with open("Stock_info.json", "w") as final:
+        json.dump(results, final, indent=4, default=str)
+
+        print("Stock data saved to Stock_info.json!")
     return results

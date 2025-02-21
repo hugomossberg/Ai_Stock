@@ -1,5 +1,6 @@
 # main.py
 import os
+import json
 import asyncio
 from dotenv import load_dotenv
 from telegram import Update
@@ -34,6 +35,8 @@ async def chat_response(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def ask_ai_stock(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    from chatgpt_client import chat_gpt
+
     user_message = update.message.text
     if user_message:
         await update.message.reply_text(f"Hämtar aktier med ticker {user_message}...")
@@ -75,4 +78,5 @@ async def main():
 
 
 if __name__ == "__main__":
+
     asyncio.run(main())
