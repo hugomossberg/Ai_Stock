@@ -14,7 +14,7 @@ async def analyse_stock(ib_client):
     for symbol in tickers:
         ticker_obj = yf.Ticker(symbol)
         info = ticker_obj.info
-        history_df = ticker_obj.history(period="max")
+        history_df = ticker_obj.history(period="1mo")
         if not history_df.empty:
             latest_close = history_df["Close"].iloc[-1]
         else:

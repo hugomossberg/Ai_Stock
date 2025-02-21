@@ -34,19 +34,41 @@ async def chat_response(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await update.message.reply_text(response)
 
 
+import re
+
+
 async def ask_ai_stock(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     from chatgpt_client import chat_gpt
 
-    user_message = update.message.text
-    if user_message:
-        await update.message.reply_text(f"Hämtar aktier med ticker {user_message}...")
-        tickers = await analyse_stock(ib_client)
-        if tickers:
-            await update.message.reply_text(
-                f"Hämtade {len(tickers)} aktier: {', '.join(tickers)}"
-            )
-        else:
-            await update.message.reply_text("Inga aktier hittades.")
+    json_open = open("Stock_info.json")
+    data = json.load(json_open)
+
+    # Försök extrahera ett ord med endast stora bokstäver
+    match = re.search(r"\b[A-Z]{2,}\b", update.message.text)
+    if match:
+        symbol = match.group(0)
+    else:
+        symbol = update.message.text.upper()
+
+    for stock in data:
+        if stock["symbol"] == symbol:
+            await update.message.reply_text(f"Aktieinfo för {stock['name']}:")
+            await update.message.reply_text(f"Latest Close: {stock['latestClose']}")
+            print("Kollar symbol:", stock["symbol"])
+            if stock["symbol"] == update.message.text.upper():
+                print("Match hittad för:", stock["symbol"])
+                ...
+            return
+
+    await update.message.reply_text("Aktie med symbolen: " + symbol + " hittades inte.")
+    try:
+        response = chat_gpt(update.message.text)
+        await update.message.reply_text(response)
+        await update.message.reply_text(f"ChatGPT-svar: {response}")
+        return
+    except Exception as e:
+        await update.message.reply_text(f"Ett fel uppstod: {str(e)}")
+        return
 
 
 async def disconnect_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
