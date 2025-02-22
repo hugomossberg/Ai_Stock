@@ -73,6 +73,8 @@ class OpenAi:
                 print(f"✅ Match hittad för: {stock['symbol']}")
                 await update.message.reply_text(f"Aktieinfo för {stock['name']}:")
                 await update.message.reply_text(f"Latest Close: {stock['latestClose']}")
+                await update.message.reply_text(f"Lastest news: {stock[['News']]}")
+
                 return
 
         print(f"❌ Aktie med symbolen {symbol} hittades INTE i JSON!")
