@@ -23,15 +23,15 @@ async def analyse_stock(ib_client):
         # Hämta senaste stängningspris
         history_df = ticker_obj.history(period="1mo")
         latest_close = history_df["Close"].iloc[-1] if not history_df.empty else None
-        news_for_you = ticker_obj.news  # Hämta nyhetsartiklar
+        news_for_you = ticker_obj.news # Hämta nyhetsartiklar
 
         stock_data = {
             "symbol": symbol,
             "name": info.get("shortName", "Okänd"),
             "sector": info.get("sector", "Okänd"),
-            "previousClose": info.get("previousClose"),
+            "prev3iousClose": info.get("previousClose"),
             "latestClose": latest_close,
-            "News": news_for_you
+            "News": news_for_you,
         }
 
         print(f"✅ {symbol}: {stock_data['latestClose']}")
@@ -39,8 +39,6 @@ async def analyse_stock(ib_client):
 
 
         results.append(stock_data)
-
-        # Vänta 1.5 sekunder för att undvika API-blockering
 
     # Spara till JSON-fil
     with open("Stock_info.json", "w") as final:

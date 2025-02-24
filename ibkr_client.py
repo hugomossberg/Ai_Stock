@@ -1,7 +1,6 @@
 # ibkr_client.py
 from ib_insync import IB, ScannerSubscription
 import asyncio
-import time
 
 
 class IbClient:

@@ -21,7 +21,6 @@ class OpenAi:
     def __init__(self):
         self.api_key = API_KEY
     async def chat_gpt(self, user_message):
-        print("chatgpt funktion körs")
         try:
             client = openai.OpenAI(api_key = self.api_key)  # Ange API-nyckeln här
             response = client.chat.completions.create(
@@ -45,8 +44,7 @@ class OpenAi:
 
     async def chat_response(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:  # se till att den importen finns
-        print("chat_response körs")
+    ) -> None:  
         user_message = update.message.text
         response = await self.chat_gpt(user_message)
         await update.message.reply_text(response)
@@ -73,10 +71,18 @@ class OpenAi:
                 print(f"✅ Match hittad för: {stock['symbol']}")
                 await update.message.reply_text(f"Aktieinfo för {stock['name']}:")
                 await update.message.reply_text(f"Latest Close: {stock['latestClose']}")
-                await update.message.reply_text(f"Lastest news: {stock[['News']]}")
-
+                
+            
+                news_list = stock.get("News")
+                if news_list:
+                    for news in news_list:
+                        title = news["content"].get("title", "Ingen titel")
+                        summary = news["content"].get("summary", "ingen sammanfattning")
+                        await update.message.reply_text(f"Nyhet: {title}\nSammanfattning: {summary}")
+                else:
+                    await update.message.reply_text("Inga nyhetsartiklar för denna aktie.")
+                await update.message.reply_text(f"Sektor: {stock.get('sector', 'okänd')}")
                 return
-
         print(f"❌ Aktie med symbolen {symbol} hittades INTE i JSON!")
 
         # Om aktien inte hittades, fråga ChatGPT istället
