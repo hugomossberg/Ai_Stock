@@ -11,7 +11,7 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
-
+from helpers import send_long_message
 
 load_dotenv()
 
@@ -50,7 +50,7 @@ class OpenAi:
         await update.message.reply_text(response)
 
     async def ask_ai_stock(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        print("🔵 ask_ai_stock har anropats!")  # 👀 Detta borde alltid synas
+        print("🔵 ask_ai_stock har anropats!")  # Detta borde alltid synas
 
         with open("Stock_info.json", "r", encoding="utf-8") as json_open:
             data = json.load(json_open)
@@ -65,31 +65,45 @@ class OpenAi:
         print(f"🔍 Extraherad symbol: {symbol}")
         print(f"📃 Alla tillgängliga symboler: {[stock['symbol'] for stock in data]}")
 
+        # Flagga för att se om vi hittade en match
+        found = False
+
         # Kolla om symbolen finns i JSON
         for stock in data:
             if stock["symbol"].upper() == symbol:
+                found = True
                 print(f"✅ Match hittad för: {stock['symbol']}")
-                await update.message.reply_text(f"Aktieinfo för {stock['name']}:")
+                await update.message.reply_text(f"Stock Info For: {stock['name']}:")
                 await update.message.reply_text(f"Latest Close: {stock['latestClose']}")
                 await update.message.reply_text(f"P/E: {stock['PE']}")
+                await update.message.reply_text(f"Market Cap: {stock['marketCap']}")
+                await update.message.reply_text(f"Volatilitet: {stock['beta']}")
+                await update.message.reply_text(f"EPS: {stock['trailingEps']}")
+                await update.message.reply_text(f"?: {stock['dividendYield']}")
+
+                message_text = (
+                    f"Quarters: {stock['quarterlyFinance']}\n"
+                    f"Balance: {stock['quarterlyBalance']}\n"
+                    f"Cashflow: {stock['quarterlyCashflow']}"
+                )
+                await send_long_message(context.bot, update.effective_chat.id, message_text)
                 
-            
                 news_list = stock.get("News")
                 if news_list:
                     for news in news_list:
                         title = news["content"].get("title", "Ingen titel")
                         summary = news["content"].get("summary", "ingen sammanfattning")
-                        await update.message.reply_text(f"Nyhet: {title}\nSammanfattning: {summary}")
+                        await update.message.reply_text(f"News: {title}\nSammanfattning: {summary}")
                 else:
                     await update.message.reply_text("Inga nyhetsartiklar för denna aktie.")
+                
                 await update.message.reply_text(f"Sektor: {stock.get('sector', 'okänd')}")
-                return
-        print(f"❌ Aktie med symbolen {symbol} hittades INTE i JSON!")
-    
+                break  # Avsluta loopen så snart en match hittas
 
-        # Om aktien inte hittades, fråga ChatGPT istället
-        try:
-            response = await self.chat_gpt(update.message.text)
-            await update.message.reply_text(response)
-        except Exception as e:
-            await update.message.reply_text(f"Ett fel uppstod: {str(e)}")
+        if not found:
+            print(f"❌ Aktie med symbolen {symbol} hittades INTE i JSON!")
+            try:
+                response = await self.chat_gpt(update.message.text)
+                await update.message.reply_text(response)
+            except Exception as e:
+                await update.message.reply_text(f"Ett fel uppstod: {str(e)}")

@@ -32,11 +32,14 @@ async def disconnect_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("IBKR API är redan nedkopplad.")
 
 
+
+
 async def main():
     global ib_client
     from ibkr_client import IbClient
     from chatgpt_client import OpenAi
     from yfinance_stock import analyse_stock
+
     
  
     # Lokal import för att undvika cirkulära beroenden

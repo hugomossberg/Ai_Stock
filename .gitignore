@@ -29,6 +29,6 @@ Thumbs.db
 config.json
 secrets.json
 .json
-
+Stock_info.json
 # Git-filer
 *.bak
