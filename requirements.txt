@@ -4,3 +4,5 @@ openai
 python-dotenv
 ib_insync
 pysqlite3-binary
+textblob
+apscheduler

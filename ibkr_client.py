@@ -1,15 +1,29 @@
 # ibkr_client.py
-from ib_insync import IB, ScannerSubscription
+from ib_insync import IB, ScannerSubscription, Stock, MarketOrder
 import asyncio
 
 
 class IbClient:
     def __init__(self):
         self.ib = IB()
+       
 
     async def connect(self):
-        await self.ib.connectAsync("127.0.0.1", 4001, clientId=1, timeout=30)
-        print("✅ API Connected!")
+        if not self.ib.connect():
+            await self.ib.connectAsync("127.0.0.1", 7497, clientId=0, timeout=30)
+            print("✅ API Connected!")
+        else:
+            ("ibkr redan ansluten")
+    
+
+    async def place_order(self, symbol, side, qty):
+        contract = Stock(symbol, "SMART", "USD")
+        order = MarketOrder(side, qty)
+        # Kör den synkrona metoden i en separat tråd
+        trade = await asyncio.to_thread(self.ib.placeOrder, contract, order)
+        print(f"Order placerad: {trade}")
+        return trade
+
 
     async def get_stocks(self):
         await asyncio.sleep(2)

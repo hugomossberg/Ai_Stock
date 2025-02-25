@@ -37,7 +37,7 @@ async def disconnect_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def main():
     global ib_client
     from ibkr_client import IbClient
-    from chatgpt_client import OpenAi
+    from chatgpt_client import OpenAi, auto_scan_and_trade
     from yfinance_stock import analyse_stock
 
     
@@ -48,17 +48,29 @@ async def main():
     
     await ib_client.connect()
     
-    # Skicka in den redan anslutna IbClient-instansen
+    
     await analyse_stock(ib_client)
-    # Du kan bearbeta analyzed_stocks vidare om du vill
+
+
+
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("dc", disconnect_command))
     app.add_handler(MessageHandler(filters.ALL, open_ai.ask_ai_stock))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, open_ai.chat_response))
 
- 
+    
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+    scheduler = AsyncIOScheduler()
+    # Notera: Eftersom scheduler inte har en Telegram context, skickar vi ADMIN_CHAT_ID med meddelanden.
+    scheduler.add_job(lambda: asyncio.create_task(auto_scan_and_trade(context=None)), 'interval', minutes=15)
+
+    scheduler.start()
+    print(f"scheduler start: {scheduler.start}")
+
+
     
     await app.run_polling()
+
     await ib_client.disconnect_ibkr()
 
 
