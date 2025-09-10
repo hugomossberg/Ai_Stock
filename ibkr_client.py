@@ -7,11 +7,11 @@ class IbClient:
     def __init__(self):
         self.ib = IB()
        
-
+    #Port 4002 för paper trading, 4001 för live trading
     async def connect(self):
         if not self.ib.isConnected():
             try:
-                await self.ib.connectAsync("127.0.0.1", 4001, clientId=1, timeout=30)
+                await self.ib.connectAsync("127.0.0.1", 4002, clientId=1, timeout=30)
                 print("✅ API Connected on 4002!")
             except Exception as e:
                 print(f"❌ API connection failed: {e}")
@@ -54,3 +54,5 @@ class IbClient:
         await asyncio.sleep(2)
         self.ib.disconnect()
         print("❌ API Disconnected!")
+
+ib_client = IbClient()
