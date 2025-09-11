@@ -6,15 +6,42 @@ from telegram.ext import ContextTypes
 from signals import buy_or_sell, execute_order
 
 # NYTT: tider för status
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 load_dotenv()
 
+ALLOW_SHORTS = os.getenv("ALLOW_SHORTS", "0").lower() in {"1","true","yes","on"}
+
+
+STATE_PATH = os.getenv("STATE_PATH", "trade_state.json")
+
+ONLY_TRADE_ON_SIGNAL_CHANGE = os.getenv("ONLY_TRADE_ON_SIGNAL_CHANGE","1").lower() in {"1","true","yes","on"}
+COOLDOWN_MIN = int(os.getenv("COOLDOWN_MIN","30"))
+MAX_POS_PER_SYMBOL = int(os.getenv("MAX_POS_PER_SYMBOL","0"))
+MAX_BUYS_PER_DAY = int(os.getenv("MAX_BUYS_PER_DAY","1"))
+MAX_SELLS_PER_DAY = int(os.getenv("MAX_SELLS_PER_DAY","2"))
+
+def _load_state():
+    try:
+        with open(STATE_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def _save_state(state: dict):
+    try:
+        with open(STATE_PATH, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+
 # ---------------- Router prompt ----------------
 ROUTER_SYS = (
     "Du är en strikt router. Läs användarens meddelande och svara ENBART med JSON.\n"
-    'Format: {"intent":"stock_query|trade_intent|status|smalltalk|other","ticker":null|"TICKER","qty":null|int,"side":null|"BUY"|"SELL"}\n'
+    'Format: {"intent":"stock_query|trade_intent|status|smalltalk|other",".tic":null|"TICKER","qty":null|int,"side":null|"BUY"|"SELL"}\n'
     "• Om meddelandet frågar om en aktie (pris/nyheter/analys) → intent=stock_query, försök hitta en ticker (t.ex. DQ).\n"
     "• Om meddelandet är en order (köp/sälj X av en ticker) → intent=trade_intent, fyll i ticker, qty, side.\n"
     "• Om det gäller status/koll (t.ex. 'status', 'läge', 'hur går det') → intent=status.\n"
@@ -121,11 +148,38 @@ class OpenAi:
             if connected:
                 # 🛠️ HÄR: hämta positioner asynkront
                 positions = await ib.reqPositionsAsync()
-                for p in positions[:5]:
+
+# Filtrera bort 0-positioner och dubbletter
+                nonzero = []
+                seen = set()
+                for p in positions:
+                    qty = float(p.position or 0.0)
+                    if abs(qty) < 1e-6:
+                        continue  # hoppa över 0.0
+                    key = p.contract.conId or (p.contract.symbol, p.contract.exchange)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    nonzero.append(p)
+
+                # Sortera så största absoluta innehav överst
+                positions_sorted = sorted(
+                    nonzero, key=lambda p: abs(float(p.position or 0.0)), reverse=True
+                )
+
+                max_rows = 10  # visa upp till 10
+                for p in positions_sorted[:max_rows]:
                     sym = p.contract.symbol
-                    qty = p.position
+                    qty = float(p.position or 0.0)
+                    qty_str = str(int(qty)) if qty.is_integer() else f"{qty:.2f}"  # 20 istället för 20.0
                     avg = float(p.avgCost or 0.0)
-                    pos_lines.append(f"• {sym}: {qty} @ {avg:.2f}")
+                    pos_lines.append(f"• {sym}: {qty_str} @ {avg:.2f}")
+
+                extra = len(positions_sorted) - min(len(positions_sorted), max_rows)
+                if extra > 0:
+                    pos_lines.append(f"… +{extra} till")
+
+
 
                 # 🛠️ HÄR: trigga uppdatering av öppna ordrar innan vi läser cachen
                 await ib.reqOpenOrdersAsync()
@@ -152,7 +206,41 @@ class OpenAi:
             f"\n\n🧾 Öppna ordrar:\n{ord_text}"
         )
         await ack.edit_text(msg)
+    
+    async def _send_tickers(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        try:
+            with open("Stock_info.json", "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            await update.message.reply_text("Kunde inte läsa Stock_info.json.")
+            return
 
+        # Plocka och sortera tickers
+        syms = sorted({(s.get("symbol") or "").upper() for s in data if s.get("symbol")})
+        if not syms:
+            await update.message.reply_text("Inga tickers hittades i Stock_info.json.")
+            return
+
+        # Senaste uppdateringstid
+        try:
+            import os
+            from datetime import datetime
+            from zoneinfo import ZoneInfo
+            mtime = os.path.getmtime("Stock_info.json")
+            ts = datetime.fromtimestamp(mtime, ZoneInfo("Europe/Stockholm"))
+            updated = ts.strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            updated = "okänd tid"
+
+        # Format: 8–10 per rad
+        lines = []
+        chunk = 10
+        for i in range(0, len(syms), chunk):
+            lines.append("· " + " · ".join(syms[i:i+chunk]))
+
+        msg = f"📦 Universum ({len(syms)} tickers) — uppd. {updated}\n" + "\n".join(lines)
+        await update.message.reply_text(msg)
+            
     async def ai_router(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = (update.message.text or "").strip()
         if not text:
@@ -170,40 +258,64 @@ class OpenAi:
             reply = await self._chat("Du svarar hjälpsamt och kort på svenska.", prompt)
             await update.message.reply_text(reply)
             return
+                
+        # Snabbkommando: lista tickers ur Stock_info.json
+        if lower in {"tickers", "/tickers", "universum", "lista", "aktier"}:
+            return await self._send_tickers(update, context)
 
         # 2) Deterministisk trade-parse: "köp 10 aapl" / "sälj 5 nvda" (sv/en)
+        # 2) Deterministisk trade-parse: "köp 10 aapl" / "sälj 20.0 nvda"
         m_trade = re.fullmatch(
-            r"(köp|buy|sälj|sell)\s+(\d+)\s+([A-Za-z0-9.\-]{1,6})",
+            r"(köp|buy|sälj|sell)\s+(\d+(?:[.,]\d+)?)\s+([A-Za-z0-9.\-]{1,6})",
             text, re.IGNORECASE
         )
         if m_trade:
             side_word, qty_str, ticker = m_trade.groups()
-            side_word = side_word.lower()
-            qty = int(qty_str)
-            side = "BUY" if side_word in {"köp", "buy"} else "SELL"
+            try:
+                qty = int(float(qty_str.replace(",", ".")))  # tillåt 20.0 och 20,0
+            except ValueError:
+                await update.message.reply_text("❌ Ogiltigt antal.")
+                return
+
+            side = "BUY" if side_word.lower() in {"köp", "buy"} else "SELL"
             ticker = ticker.upper()
 
-            # Läs cache
+            # Läs cache (valfritt)
+            stocks_by_symbol = {}
             try:
                 with open("Stock_info.json","r",encoding="utf-8") as f:
                     data = json.load(f)
                 stocks_by_symbol = {s["symbol"].upper(): s for s in data}
             except Exception:
-                await update.message.reply_text("Kunde inte läsa Stock_info.json.")
-                return
+                pass
 
-            stock = stocks_by_symbol.get(ticker)
-            if not stock:
-                await update.message.reply_text(f"Hittar ingen data för {ticker}.")
-                return
+            stock = stocks_by_symbol.get(ticker) or {"symbol": ticker, "name": ticker}
 
             ib = context.application.bot_data.get("ib")
             if not ib or not ib.ib.isConnected():
                 await update.message.reply_text("⚠️ IBKR inte ansluten – ingen order lagd.")
                 return
 
+            # 🔒 Blockera oönskad short / sälj mer än du äger
+            if side == "SELL" and not ALLOW_SHORTS:
+                positions = await ib.ib.reqPositionsAsync()
+                held = {p.contract.symbol.upper(): float(p.position or 0) for p in positions}
+                pos = held.get(ticker, 0.0)
+
+                if pos <= 0:
+                    await update.message.reply_text(f" Skippar SÄLJ {ticker} – äger inte aktien.")
+                    return
+
+                if qty > pos:
+                    await update.message.reply_text(
+                        f"⛔ Du äger bara {int(pos)} {ticker}. Säg t.ex. 'sälj {int(pos)} {ticker}'."
+                    )
+                    return
+
+               
+            # ✅ Lägg order (gäller både BUY och SELL efter ev. validering)
             ack = await update.message.reply_text(
-                f"⏳ Lägger order: {'KÖP' if side=='BUY' else 'SÄLJ'} {qty} {stock['symbol']} …"
+                f"⏳ Lägger order: {'KÖP' if side=='BUY' else 'SÄLJ'} {qty} {ticker} …"
             )
             trade = await execute_order(
                 ib, stock, "Köp" if side == "BUY" else "Sälj", qty,
@@ -212,12 +324,14 @@ class OpenAi:
             )
             if trade:
                 await ack.edit_text(
-                    f"📨 Order skickad: {trade.order.action} {int(trade.order.totalQuantity)} {stock['symbol']} "
+                    f"📨 Order skickad: {trade.order.action} {int(trade.order.totalQuantity)} {ticker} "
                     f"(status: {trade.orderStatus.status})"
                 )
             else:
                 await ack.edit_text("Ingen order skickad.")
             return
+
+
 
         # 3) Ticker-snabbväg för lookup (exakt ticker eller "TICKER aktie")
         #    OBS: vi kör EFTER status/trade, och bara på rena ticker-meddelanden.
@@ -300,40 +414,133 @@ class OpenAi:
 
         reply = await self._chat("Svara kort på svenska.", text)
         await update.message.reply_text(reply)
+   
+    # --------- Auto-scan för schemaläggaren (anropar din signal + ev order) ----------
 
 
-
-
-# --------- Auto-scan för schemaläggaren (anropar din signal + ev order) ----------
-# --- auto_scan_and_trade ---
 async def auto_scan_and_trade(bot, ib_client, admin_chat_id: int):
     try:
+        # 1) Läs universum
         with open("Stock_info.json", "r", encoding="utf-8") as f:
             data = json.load(f)
 
+        # 2) IB anslutning?
         if not ib_client or not ib_client.ib.isConnected():
             if admin_chat_id:
                 await bot.send_message(admin_chat_id, "⚠️ IBKR inte ansluten – hoppar över autoscan.")
             return
 
+        AUTOTRADE = os.getenv("AUTOTRADE", "0").lower() in {"1","on","true","yes"}
+        AUTO_QTY  = int(os.getenv("AUTO_QTY", "10"))
+
+        # 3) Hämta positioner en gång
+        positions = await ib_client.ib.reqPositionsAsync()
+        held = {p.contract.symbol.upper(): float(p.position or 0) for p in positions}
+
+        # 4) Ladda & rensa state per dag
+        state = _load_state()
+        today = datetime.now(US_TZ).date().isoformat()
+        if state.get("day") != today:
+            state = {"day": today, "symbols": {}}
+        symbols_state = state.setdefault("symbols", {})
+
         for stock in data:
+            sym = (stock.get("symbol") or "").upper()
+            if not sym:
+                continue
+
             signal = buy_or_sell(stock)
+
+            # (valfritt) skicka alltid signal till chat
             if admin_chat_id:
-                await bot.send_message(admin_chat_id, f"{stock['symbol']} – Signal: {signal}")
+                await bot.send_message(admin_chat_id, f"{sym} – Signal: {signal}")
 
-            trade = await execute_order(
-                ib_client, stock, signal, qty=10,
-                bot=bot, chat_id=admin_chat_id
-            )
+            # Hämta symbol-state
+            sst = symbols_state.setdefault(sym, {})
+            last_signal = sst.get("last_signal")
+            last_ts_iso = sst.get("last_trade_ts")
+            last_trade_dt = None
+            if last_ts_iso:
+                try:
+                    last_trade_dt = datetime.fromisoformat(last_ts_iso)
+                except Exception:
+                    last_trade_dt = None
 
-            if trade is not None and admin_chat_id:
-                await bot.send_message(
-                    admin_chat_id,
-                    f"Order skickad: {trade.order.action} {int(trade.order.totalQuantity)} {stock['symbol']} "
-                    f"(status: {trade.orderStatus.status})"
+            buys_today = int(sst.get("buys_today", 0))
+            sells_today = int(sst.get("sells_today", 0))
+
+            # 5) Spärr: handla bara på signaländring
+            if ONLY_TRADE_ON_SIGNAL_CHANGE and last_signal == signal:
+                # ingen ändring → ingen affär
+                continue
+
+            # 6) Spärr: cooldown per ticker
+            if last_trade_dt and (datetime.now(US_TZ) - last_trade_dt) < timedelta(minutes=COOLDOWN_MIN):
+                # inom cooldown → hoppa
+                continue
+
+            trade = None
+
+            if AUTOTRADE and signal in {"Köp", "Sälj"}:
+                qty = AUTO_QTY
+                pos = held.get(sym, 0.0)
+
+                # 7) Max affärer per dag per riktning
+                if signal == "Köp" and buys_today >= MAX_BUYS_PER_DAY:
+                    # redan max köp idag
+                    continue
+                if signal == "Sälj" and sells_today >= MAX_SELLS_PER_DAY:
+                    # redan max sälj idag
+                    continue
+
+                # 8) Positionstak vid köp
+                if signal == "Köp" and MAX_POS_PER_SYMBOL > 0:
+                    # köp inte över cap
+                    max_add = int(MAX_POS_PER_SYMBOL - pos)
+                    if max_add <= 0:
+                        # redan vid/över taket
+                        continue
+                    qty = min(qty, max_add)
+
+                # 9) Hindra oönskad short
+                if signal == "Sälj" and not ALLOW_SHORTS:
+                    if pos <= 0:
+                        if admin_chat_id:
+                            await bot.send_message(admin_chat_id, f"⛔ Kan inte sälja {sym} – du äger inte aktien.")
+                        continue
+                    qty = min(qty, int(pos))
+                    if qty <= 0:
+                        continue
+
+                # 10) Lägg order
+                trade = await execute_order(
+                    ib_client, stock, signal, qty=qty,
+                    bot=bot, chat_id=admin_chat_id
                 )
-            elif admin_chat_id:
-                await bot.send_message(admin_chat_id, f"{stock['symbol']} – Ingen order (Håll).")
+
+                # Om order gick iväg, uppdatera state
+                if trade:
+                    sst["last_trade_ts"] = datetime.now(US_TZ).isoformat()
+                    if signal == "Köp":
+                        sst["buys_today"] = buys_today + 1
+                    else:
+                        sst["sells_today"] = sells_today + 1
+                    sst["last_signal"] = signal
+                    symbols_state[sym] = sst
+                    _save_state(state)
+
+            # (valfritt) feedback
+            if admin_chat_id:
+                if trade is not None:
+                    await bot.send_message(
+                        admin_chat_id,
+                        f"Order skickad: {trade.order.action} {int(trade.order.totalQuantity)} {sym} "
+                        f"(status: {trade.orderStatus.status})"
+                    )
+                else:
+                    # tyst läge går att välja, men detta hjälper vid felsökning
+                    await bot.send_message(admin_chat_id, f"{sym} – Ingen order ({signal}).")
+
     except Exception as e:
         if admin_chat_id:
             await bot.send_message(admin_chat_id, f"❌ auto_scan_and_trade fel: {e}")
