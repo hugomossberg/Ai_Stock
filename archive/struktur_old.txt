@@ -1,0 +1,13 @@
+main.py startar allt
+
+jobs.py schemalägger
+
+autoscan.py kör scan och ev trade
+
+scanner.py bygger Stock_info.json
+
+signals.py räknar signal
+
+ibkr_client.py lägger order
+
+chatgpt_client.py är Telegram-router + AI + status + sell

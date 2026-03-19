@@ -28,7 +28,8 @@ Thumbs.db
 # Konfigurationsfiler som kan innehålla känslig information
 config.json
 secrets.json
-.json
+*.json
 Stock_info.json
 # Git-filer
 *.bak
+.struktur.txt 

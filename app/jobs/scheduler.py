@@ -3,8 +3,8 @@ from datetime import time
 from zoneinfo import ZoneInfo
 from telegram.ext import Application
 
-from autoscan import run_autoscan_once
-from premarket import run_premarket_scan
+from app.core.autoscan import run_autoscan_once
+from app.jobs.premarket import run_premarket_scan
 
 log = logging.getLogger("jobs")
 SE_TZ = ZoneInfo("Europe/Stockholm")

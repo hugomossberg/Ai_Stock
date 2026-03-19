@@ -3,8 +3,8 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 import yfinance as yf
 
-from signals import buy_or_sell
-from helpers import send_long_message
+from app.core.signals import buy_or_sell
+from app.core.helpers import send_long_message
 
 US_TZ = ZoneInfo("America/New_York")
 SE_TZ = ZoneInfo("Europe/Stockholm")

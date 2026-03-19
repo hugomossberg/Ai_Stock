@@ -2,6 +2,7 @@
 import os, json, logging, time
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from app.config import STOCK_INFO_PATH
 
 import yfinance as yf
 
@@ -49,12 +50,12 @@ def _fetch_yf_snapshot(ticker: str) -> dict:
     return stock
 
 def _write_stock_info(rows: list[dict]):
-    with open("Stock_info.json","w",encoding="utf-8") as f:
+    with open(STOCK_INFO_PATH, "w", encoding="utf-8") as f:
         json.dump(rows, f, ensure_ascii=False, indent=2)
 
 def _read_stock_info() -> list[dict] | None:
     try:
-        with open("Stock_info.json","r",encoding="utf-8") as f:
+        with open(STOCK_INFO_PATH, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return None
