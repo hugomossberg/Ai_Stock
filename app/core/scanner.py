@@ -1,13 +1,13 @@
-#scanner.py
 import json
 import logging
-import asyncio
+from pathlib import Path
 
 from app.config import STOCK_INFO_PATH
 from app.core.market_profile import PROFILE, MARKET_PROFILE
-
+from app.data.market_data import MarketDataService
 
 log = logging.getLogger("scanner")
+md = MarketDataService()
 
 
 def _to_float(x, default=None):
@@ -18,103 +18,6 @@ def _to_float(x, default=None):
     except Exception:
         return default
 
-async def _fetch_ib_snapshot(ib_client, symbol: str) -> dict | None:
-    ticker = None
-    contract = None
-
-    try:
-        from ib_insync import Stock
-
-        contract = Stock(symbol, "SMART", "USD")
-        qualified = await ib_client.ib.qualifyContractsAsync(contract)
-        if not qualified:
-            log.warning("[scanner] Kunde inte kvalificera %s", symbol)
-            return None
-
-        contract = qualified[0]
-
-        details = await ib_client.ib.reqContractDetailsAsync(contract)
-        cd = details[0] if details else None
-
-        ib_client.ib.reqMarketDataType(3)  # delayed
-        ticker = ib_client.ib.reqMktData(contract, "", False, False)
-        await asyncio.sleep(2.5)
-
-        price_candidates = [
-            _to_float(getattr(ticker, "marketPrice", lambda: None)()),
-            _to_float(getattr(ticker, "last", None)),
-            _to_float(getattr(ticker, "close", None)),
-            _to_float(getattr(ticker, "bid", None)),
-            _to_float(getattr(ticker, "ask", None)),
-        ]
-        last_price = next((p for p in price_candidates if p is not None and p > 0), None)
-
-        name = symbol
-        sector = None
-        market_cap = None
-
-        if cd:
-            name = getattr(cd, "longName", None) or symbol
-
-        stock = {
-            "symbol": symbol,
-            "name": name,
-            "latestClose": last_price,
-            "PE": None,
-            "marketCap": market_cap,
-            "beta": None,
-            "trailingEps": None,
-            "dividendYield": None,
-            "sector": sector,
-            "News": [],
-        }
-
-        return stock
-
-    except Exception as e:
-        log.warning("[scanner] IB snapshot fail för %s: %s", symbol, e)
-        return None
-
-    finally:
-        if contract is not None:
-            try:
-                ib_client.ib.cancelMktData(contract)
-            except Exception:
-                pass
-
-
-def _is_good_snapshot(stock: dict) -> tuple[bool, str | None]:
-    price = _to_float(stock.get("latestClose"))
-    market_cap = _to_float(stock.get("marketCap"))
-    name = (stock.get("name") or "").lower()
-    symbol = (stock.get("symbol") or "").upper()
-
-    min_price = PROFILE["min_price"]
-    min_market_cap = PROFILE["min_market_cap"]
-
-    leveraged_hints = [
-        "2x", "3x", "ultra", "ultrapro", "daily",
-        "bull", "bear", "short", "leveraged"
-    ]
-
-    if price is None:
-        return False, "saknar pris"
-    if price < min_price:
-        return False, f"pris under {min_price}"
-
-    if market_cap is not None and market_cap < min_market_cap:
-        return False, f"market cap under {min_market_cap}"
-
-    if symbol in {"TSLL", "TSLQ", "SQQQ"}:
-        return False, "leveraged/inverse ETF"
-
-    if any(hint in name for hint in leveraged_hints):
-        return False, "leveraged/inverse ETF"
-
-    return True, None
-
-
-from pathlib import Path
 
 def _write_stock_info(rows: list[dict]):
     Path(STOCK_INFO_PATH).parent.mkdir(parents=True, exist_ok=True)
@@ -136,158 +39,168 @@ def _fallback_tickers() -> list[str]:
     return ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "AMD", "TSLA", "NFLX", "INTC", "QCOM", "AVGO"]
 
 
-def _looks_swedish(contract, contract_details) -> bool:
-    currency = (getattr(contract, "currency", "") or "").upper()
-    primary_exchange = (getattr(contract, "primaryExchange", "") or "").upper()
-    exchange = (getattr(contract, "exchange", "") or "").upper()
-    local_symbol = (getattr(contract, "localSymbol", "") or "").upper()
-    long_name = (getattr(contract_details, "longName", "") or "").upper()
-    market_name = (getattr(contract_details, "marketName", "") or "").upper()
+def _is_good_snapshot(stock: dict) -> tuple[bool, str | None]:
+    price = _to_float(stock.get("latestClose"))
+    market_cap = _to_float(stock.get("marketCap"))
+    name = (stock.get("name") or "").lower()
+    symbol = (stock.get("symbol") or "").upper()
 
-    if currency != "SEK":
-        return False
+    min_price = PROFILE["min_price"]
+    min_market_cap = PROFILE["min_market_cap"]
 
-    swedish_markers = {"OMS", "SFB", "SMART"}
-    if primary_exchange in swedish_markers:
-        return True
-    if exchange in swedish_markers:
-        return True
-
-    if ".ST" in local_symbol:
-        return True
-
-    if "SWEDEN" in long_name or "SWEDEN" in market_name:
-        return True
-
-    return True
-
-
-def _normalize_se_symbol(symbol: str, local_symbol: str = "", long_name: str = "") -> str:
-    raw_symbol = (symbol or "").upper().strip()
-    raw_local = (local_symbol or "").upper().strip()
-    raw_name = (long_name or "").upper().strip()
-
-    if raw_symbol.endswith(".ST"):
-        return raw_symbol
-
-    combo = " ".join(part for part in [raw_symbol, raw_local, raw_name] if part)
-
-    series_candidates = [
-        (" A", "-A.ST"),
-        (" B", "-B.ST"),
-        (" SER. A", "-A.ST"),
-        (" SER. B", "-B.ST"),
-        (" SERIES A", "-A.ST"),
-        (" SERIES B", "-B.ST"),
+    leveraged_hints = [
+        "2x", "3x", "ultra", "ultrapro", "daily",
+        "bull", "bear", "short", "leveraged"
     ]
 
-    for needle, suffix in series_candidates:
-        if needle in combo:
-            return f"{raw_symbol}{suffix}"
+    if price is None:
+        return False, "saknar pris"
 
-    return f"{raw_symbol}.ST"
+    if price < min_price:
+        return False, f"pris under {min_price}"
+
+    if market_cap is not None and market_cap < min_market_cap:
+        return False, f"market cap under {min_market_cap}"
+
+    if symbol in {"TSLL", "TSLQ", "SQQQ"}:
+        return False, "leveraged/inverse ETF"
+
+    if any(hint in name for hint in leveraged_hints):
+        return False, "leveraged/inverse ETF"
+
+    return True, None
 
 
-def _to_market_symbol(symbol: str, local_symbol: str = "", long_name: str = "") -> str:
-    if PROFILE["currency"] == "SEK":
-        if local_symbol.endswith(".ST"):
-            return local_symbol.upper()
-        return _normalize_se_symbol(symbol, local_symbol, long_name)
-    return (symbol or "").upper().strip()
+def _build_stock_row(symbol: str, quote: dict, profile: dict, fundamentals: dict | None = None) -> dict:
+    fundamentals = fundamentals or {}
+
+    return {
+        "symbol": symbol,
+        "name": profile.get("name") or symbol,
+        "latestClose": quote.get("price"),
+        "PE": fundamentals.get("pe"),
+        "marketCap": profile.get("marketCap") or quote.get("marketCap") or fundamentals.get("marketCap"),
+        "beta": profile.get("beta"),
+        "trailingEps": fundamentals.get("epsTTM"),
+        "dividendYield": fundamentals.get("dividendYieldTTM"),
+        "sector": profile.get("sector"),
+        "News": [],
+    }
 
 
-async def _ib_scanner(ib_client, limit: int) -> list[str]:
+def _screen_filters(limit: int) -> dict:
+    filters = {
+        "limit": max(limit * 4, 40),
+        "priceMoreThan": PROFILE["min_price"],
+        "volumeMoreThan": 200000,
+    }
+
+    min_market_cap = PROFILE.get("min_market_cap")
+    if min_market_cap:
+        filters["marketCapMoreThan"] = int(min_market_cap)
+
+    if PROFILE["currency"] == "SEK" or MARKET_PROFILE == "SE":
+        filters["country"] = "SE"
+    else:
+        filters["country"] = "US"
+
+    return filters
+
+
+def _get_candidate_symbols(limit: int) -> list[str]:
     try:
-        from ib_insync import ScannerSubscription
-
-        sub = ScannerSubscription()
-        sub.instrument = PROFILE["scanner_instrument"]
-        sub.locationCode = PROFILE["scanner_location"]
-        sub.scanCode = PROFILE["scanner_code"]
-
-        items = await ib_client.ib.reqScannerDataAsync(sub, [])
+        filters = _screen_filters(limit)
+        rows = md.screen_stocks(**filters)
 
         seen = set()
-        out = []
+        symbols = []
 
-        for it in items[: limit * 10]:
-            cd = getattr(it, "contractDetails", None)
-            if not cd or not getattr(cd, "contract", None):
-                continue
-
-            c = cd.contract
-            sym = (getattr(c, "symbol", "") or "").upper().strip()
-            local_symbol = (getattr(c, "localSymbol", "") or "").upper().strip()
-            long_name = (getattr(cd, "longName", "") or "").strip()
-            currency = (getattr(c, "currency", "") or "").upper().strip()
-            exchange = (getattr(c, "exchange", "") or "").upper().strip()
-            primary_exchange = (getattr(c, "primaryExchange", "") or "").upper().strip()
-            market_name = (getattr(cd, "marketName", "") or "").strip()
-
+        for row in rows:
+            sym = (row.get("symbol") or "").upper().strip()
             if not sym:
                 continue
+            if sym in seen:
+                continue
 
-            log.info(
-                "[scanner] RAW IB sym=%s local=%s currency=%s exch=%s primary=%s longName=%s marketName=%s",
-                sym,
-                local_symbol,
-                currency,
-                exchange,
-                primary_exchange,
-                long_name,
-                market_name,
-            )
+            seen.add(sym)
+            symbols.append(sym)
 
-            if MARKET_PROFILE == "SE":
-                if not _looks_swedish(c, cd):
-                    log.info("[scanner] Skippar ej svensk kandidat: %s", sym)
-                    continue
-                market_symbol = _to_market_symbol(sym, local_symbol, long_name)
-            else:
-                market_symbo = sym
-
-            if market_symbo not in seen:
-                seen.add(market_symbo)
-                out.append(market_symbo)
-
-            if len(out) >= max(10, limit * 3):
+            if len(symbols) >= max(limit * 3, 25):
                 break
 
-        log.info("[scanner] IB scanner gav %d filtrerade symboler", len(out))
-        return out
+        if symbols:
+            log.info("[scanner] FMP screener gav %d kandidater", len(symbols))
+            return symbols
 
     except Exception as e:
-        log.error("[scanner] IB scanner misslyckades: %s", e)
-        return []
+        log.warning("[scanner] FMP screener misslyckades: %s", e)
+
+    fallback = _fallback_tickers()
+    log.warning("[scanner] Använder fallback-tickers (%d st)", len(fallback))
+    return fallback
 
 
-async def refresh_stock_info(ib_client, limit: int = 50) -> list[dict]:
-    tickers = []
+async def refresh_stock_info(ib_client=None, limit: int = 50) -> list[dict]:
+    tickers = _get_candidate_symbols(limit)
 
-    if ib_client and ib_client.ib.isConnected():
-        tickers = await _ib_scanner(ib_client, limit)
-
-    if tickers:
-        log.info("[scanner] Använder IB-scanner (%d tickers).", len(tickers))
-    else:
-        log.warning("[scanner] IB-scanner gav 0 tickers.")
+    if not tickers:
         old = _read_stock_info()
         if isinstance(old, list) and old:
-            log.warning("[scanner] Behåller gammal Stock_info.json (%d rader).", len(old))
+            log.warning("[scanner] Inga tickers – behåller gammal Stock_info.json (%d rader).", len(old))
             return old
-
-        log.warning("[scanner] Ingen gammal fil finns och IB gav 0 tickers.")
+        log.warning("[scanner] Inga tickers och ingen gammal fil finns.")
         return []
 
     rows = []
-    max_fetch = min(len(tickers), limit * 3)
+    selected = tickers[: max(limit * 3, 25)]
 
-    for i, sym in enumerate(tickers[: limit * 3], start=1):
+    try:
+        quotes = md.get_batch_quotes(selected)
+    except Exception as e:
+        log.warning("[scanner] batch quotes misslyckades: %s", e)
+        quotes = {}
+
+    for i, sym in enumerate(selected, start=1):
         try:
-            log.info("[scanner] Hämtar %s (%d/%d)", sym, i, max_fetch)
-            stock = await _fetch_ib_snapshot(ib_client, sym)
-            if not stock:
+            log.info("[scanner] Hämtar %s (%d/%d)", sym, i, len(selected))
+
+            quote = quotes.get(sym) or {}
+            if not quote:
+                try:
+                    quote = md.get_quote(sym)
+                except Exception as e:
+                    log.warning("[scanner] quote fail för %s: %s", sym, e)
+                    continue
+
+            try:
+                profile = md.get_profile(sym)
+            except Exception as e:
+                log.warning("[scanner] profile fail för %s: %s", sym, e)
+                profile = {
+                    "name": sym,
+                    "marketCap": quote.get("marketCap"),
+                    "beta": None,
+                    "sector": None,
+                    "lastDividend": None,
+                    "isEtf": None,
+                }
+
+            if profile.get("isEtf"):
+                log.info("[scanner] Skippar %s → ETF", sym)
                 continue
+
+            name_lower = (profile.get("name") or "").lower()
+            if any(x in name_lower for x in ["fund", "index fund", "etf", "trust"]):
+                log.info("[scanner] Skippar %s → fond/ETF-lik", sym)
+                continue
+
+            try:
+                fundamentals = md.get_fundamentals(sym)
+            except Exception as e:
+                log.warning("[scanner] fundamentals fail för %s: %s", sym, e)
+                fundamentals = {}
+
+            stock = _build_stock_row(sym, quote, profile, fundamentals)
 
             ok, reason = _is_good_snapshot(stock)
             if not ok:
@@ -298,8 +211,6 @@ async def refresh_stock_info(ib_client, limit: int = 50) -> list[dict]:
 
             if len(rows) >= limit:
                 break
-
-            await asyncio.sleep(0.2)
 
         except Exception as e:
             log.warning("[scanner] Misslyckades med %s: %s", sym, e)
@@ -318,12 +229,12 @@ async def refresh_stock_info(ib_client, limit: int = 50) -> list[dict]:
     return rows
 
 
-async def ensure_stock_info(ib_client, min_count: int = 10) -> list[dict]:
+async def ensure_stock_info(ib_client=None, min_count: int = 10) -> list[dict]:
     data = _read_stock_info()
 
     if isinstance(data, list) and len(data) >= max(4, min_count // 2):
         return data
 
     log.info("[scanner] Stock_info.json saknas/korrupt/otillräcklig – bygger om…")
-    data = await refresh_stock_info(ib_client, limit=min_count)
+    data = await refresh_stock_info(ib_client=ib_client, limit=min_count)
     return data or []

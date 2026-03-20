@@ -1,13 +1,17 @@
+#premarket.py
 import json
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
-import yfinance as yf
 
 from app.core.signals import get_signal_analysis
 from app.core.helpers import send_long_message
+from app.data.fmp_client import FMPClient
 
 US_TZ = ZoneInfo("America/New_York")
 SE_TZ = ZoneInfo("Europe/Stockholm")
+
+fmp = FMPClient()
+
 
 def _to_float(x, default=None):
     try:
@@ -17,51 +21,53 @@ def _to_float(x, default=None):
     except Exception:
         return default
 
+
 def _normalize_stock(stock: dict) -> dict:
     s = dict(stock or {})
-    s["latestClose"]   = _to_float(s.get("latestClose"),   0.0)
-    s["PE"]            = _to_float(s.get("PE"),            0.0)
-    s["marketCap"]     = _to_float(s.get("marketCap"),     0.0)
-    s["beta"]          = _to_float(s.get("beta"),          0.0)
-    s["trailingEps"]   = _to_float(s.get("trailingEps"),   0.0)
+    s["latestClose"] = _to_float(s.get("latestClose"), 0.0)
+    s["PE"] = _to_float(s.get("PE"), 0.0)
+    s["marketCap"] = _to_float(s.get("marketCap"), 0.0)
+    s["beta"] = _to_float(s.get("beta"), 0.0)
+    s["trailingEps"] = _to_float(s.get("trailingEps"), 0.0)
     s["dividendYield"] = _to_float(s.get("dividendYield"), 0.0)
     return s
 
-def _fetch_yf_snapshot(ticker: str) -> dict:
-    t = yf.Ticker(ticker)
-    info = t.info or {}
-    latest_close = info.get("currentPrice") or info.get("regularMarketPrice") or info.get("previousClose")
+
+def _fetch_fmp_snapshot(ticker: str) -> dict:
+    quote = fmp.quote_short(ticker) or {}
+    profile = fmp.profile(ticker) or {}
+    news = fmp.stock_news(ticker, limit=3) or []
+
     stock = {
         "symbol": ticker,
-        "name": info.get("shortName") or info.get("longName") or ticker,
-        "latestClose": latest_close,
-        "PE": info.get("trailingPE") or info.get("forwardPE"),
-        "marketCap": info.get("marketCap"),
-        "beta": info.get("beta"),
-        "trailingEps": info.get("trailingEps"),
-        "dividendYield": info.get("dividendYield"),
-        "sector": info.get("sector"),
+        "name": profile.get("companyName") or ticker,
+        "latestClose": quote.get("price"),
+        "PE": profile.get("pe"),
+        "marketCap": profile.get("marketCap"),
+        "beta": profile.get("beta"),
+        "trailingEps": profile.get("eps"),
+        "dividendYield": profile.get("lastDividend"),
+        "sector": profile.get("sector"),
         "News": [],
     }
-    try:
-        news = t.news or []
-        for n in news[:3]:
-            stock["News"].append({
-                "content": {
-                    "title": n.get("title",""),
-                    "summary": n.get("summary","") or "",
-                    "publisher": n.get("publisher",""),
-                    "link": n.get("link",""),
-                }
-            })
-    except Exception:
-        pass
+
+    for n in news[:3]:
+        stock["News"].append({
+            "content": {
+                "title": n.get("title", ""),
+                "summary": n.get("text", "") or "",
+                "publisher": n.get("publisher") or n.get("site", ""),
+                "link": n.get("url", ""),
+            }
+        })
+
     return stock
+
 
 async def run_premarket_scan(bot, ib_client, admin_chat_id: int, want_ai: bool = True, open_ai=None):
     """
     1) Läser positioner (IB)
-    2) Hämtar snabbdata + rubriker (yfinance)
+    2) Hämtar snabbdata + rubriker (FMP)
     3) Kör signalanalys → Köp/Håll/Sälj
     4) Skickar rapport i Telegram
     5) (om want_ai & open_ai) AI-kommentar per ticker
@@ -88,8 +94,15 @@ async def run_premarket_scan(bot, ib_client, admin_chat_id: int, want_ai: bool =
     ai_blocks = []
 
     for sym, qty in sorted(held.items(), key=lambda kv: (-abs(kv[1]), kv[0])):
-        snap = _fetch_yf_snapshot(sym)
-        norm = _normalize_stock(snap)
+        try:
+            snap = _fetch_fmp_snapshot(sym)
+            norm = _normalize_stock(snap)
+        except Exception as e:
+            snap = {"symbol": sym, "News": []}
+            norm = _normalize_stock({"symbol": sym})
+            rows.append(f"• {sym} ⚪ Håll — kunde inte hämta FMP-data ({e})")
+            continue
+
         try:
             analysis = get_signal_analysis(norm)
             signal = analysis["signal"]
@@ -101,18 +114,19 @@ async def run_premarket_scan(bot, ib_client, admin_chat_id: int, want_ai: bool =
             }
             signal = analysis["signal"]
 
-        tag = {"Köp":"🟢 Köp", "Sälj":"🔴 Sälj"}.get(signal, "⚪ Håll")
+        tag = {"Köp": "🟢 Köp", "Sälj": "🔴 Sälj"}.get(signal, "⚪ Håll")
+
         nh = snap.get("News") or []
         nline = ""
         if nh:
-            first = nh[0].get("content",{}) or {}
+            first = nh[0].get("content", {}) or {}
             tit = (first.get("title") or "").strip()
             pub = (first.get("publisher") or "").strip()
             if tit:
                 nline = f" • Nyhet: {tit} ({pub})"
 
         price = norm.get("latestClose")
-        price_str = f"{price:.2f}" if isinstance(price,(int,float)) and price is not None else "–"
+        price_str = f"{price:.2f}" if isinstance(price, (int, float)) and price is not None else "–"
         rows.append(f"• {sym} {tag} — pris {price_str}{nline}")
 
         if want_ai and open_ai:
@@ -129,16 +143,20 @@ async def run_premarket_scan(bot, ib_client, admin_chat_id: int, want_ai: bool =
         f"SE {now_se:%H:%M} | ET {now_et:%H:%M}\n"
         f"Analyserar ägda tickers + senaste rubriker • markerar Köp/Håll/Sälj\n"
     )
+
     await send_long_message(bot, admin_chat_id, f"{header}\n" + "\n".join(rows))
 
     if ai_blocks:
         await send_long_message(bot, admin_chat_id, "\n\n".join(ai_blocks))
 
     try:
-        out = {"ts": datetime.now(timezone.utc).isoformat(), "rows": rows, "ai": ai_blocks}
+        out = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "rows": rows,
+            "ai": ai_blocks,
+        }
         report_path = f"storage/reports/premarket_report_{now_se:%Y%m%d}.json"
         with open(report_path, "w", encoding="utf-8") as f:
             json.dump(out, f, ensure_ascii=False, indent=2)
-            
     except Exception:
         pass

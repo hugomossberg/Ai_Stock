@@ -1,4 +1,3 @@
-# technicals.py
 import math
 import time
 import logging
@@ -17,10 +16,7 @@ _IB_CLIENT = None
 
 def set_ib_client(ib_client):
     """
-    Sätts från din app vid startup, t.ex. efter att IB kopplat upp.
-    Exempel:
-        from app.core.technicals import set_ib_client
-        set_ib_client(ib_client)
+    Sätts från appen vid startup efter att IB kopplat upp.
     """
     global _IB_CLIENT
     _IB_CLIENT = ib_client
@@ -72,6 +68,7 @@ def _build_contract(symbol: str):
     if MARKET_PROFILE == "SE":
         base_symbol = symbol.replace(".ST", "")
         return Stock(base_symbol, "SMART", "SEK")
+
     return Stock(symbol, "SMART", "USD")
 
 
@@ -104,7 +101,7 @@ def _bars_to_df(bars):
 
 def fetch_price_history(symbol: str, period: str = "6mo", interval: str = "1d"):
     """
-    Hämtar historiska candles via IB istället för Yahoo.
+    Hämtar historiska candles via IB.
     Returnerar pandas DataFrame eller None.
     Cachar kortvarigt för att minska upprepade anrop.
     """
