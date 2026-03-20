@@ -1,9 +1,9 @@
-import os, json
+import json
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 import yfinance as yf
 
-from app.core.signals import buy_or_sell
+from app.core.signals import get_signal_analysis
 from app.core.helpers import send_long_message
 
 US_TZ = ZoneInfo("America/New_York")
@@ -62,7 +62,7 @@ async def run_premarket_scan(bot, ib_client, admin_chat_id: int, want_ai: bool =
     """
     1) Läser positioner (IB)
     2) Hämtar snabbdata + rubriker (yfinance)
-    3) Kör buy_or_sell → Köp/Håll/Sälj
+    3) Kör signalanalys → Köp/Håll/Sälj
     4) Skickar rapport i Telegram
     5) (om want_ai & open_ai) AI-kommentar per ticker
     """
@@ -91,9 +91,15 @@ async def run_premarket_scan(bot, ib_client, admin_chat_id: int, want_ai: bool =
         snap = _fetch_yf_snapshot(sym)
         norm = _normalize_stock(snap)
         try:
-            signal = buy_or_sell(norm)
-        except Exception:
-            signal = "Håll"
+            analysis = get_signal_analysis(norm)
+            signal = analysis["signal"]
+        except Exception as e:
+            analysis = {
+                "symbol": sym,
+                "signal": "Håll",
+                "error": str(e),
+            }
+            signal = analysis["signal"]
 
         tag = {"Köp":"🟢 Köp", "Sälj":"🔴 Sälj"}.get(signal, "⚪ Håll")
         nh = snap.get("News") or []
@@ -130,7 +136,9 @@ async def run_premarket_scan(bot, ib_client, admin_chat_id: int, want_ai: bool =
 
     try:
         out = {"ts": datetime.now(timezone.utc).isoformat(), "rows": rows, "ai": ai_blocks}
-        with open(f"premarket_report_{now_se:%Y%m%d}.json", "w", encoding="utf-8") as f:
+        report_path = f"storage/reports/premarket_report_{now_se:%Y%m%d}.json"
+        with open(report_path, "w", encoding="utf-8") as f:
             json.dump(out, f, ensure_ascii=False, indent=2)
+            
     except Exception:
         pass

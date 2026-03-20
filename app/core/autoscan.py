@@ -6,7 +6,7 @@ import inspect
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from app.core.signals import buy_or_sell, execute_order
+from app.core.signals import get_signal_analysis, execute_order
 from app.core.universe_manager import load_state, save_state, update_signal_state
 from app.core.helpers import kill_switch_ok, us_market_open_now, is_dup
 from app.core.scanner import ensure_stock_info
@@ -286,14 +286,27 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
     orders_sell = 0
 
     # -------- Iterera kandidater --------
+        # -------- Iterera kandidater --------
     for sym in list(scan_set):
         raw = by_sym.get(sym) or {"symbol": sym, "name": sym}
         stock = _normalize_stock(raw)
 
         try:
-            signal = buy_or_sell(stock)
-        except Exception:
+            analysis = get_signal_analysis(stock)
+            signal = analysis["signal"]
+            analysis["timestamp"] = _now_utc().isoformat()
+
+            with open("storage/signal_log.jsonl", "a", encoding="utf-8") as f:
+                f.write(json.dumps(analysis, ensure_ascii=False) + "\n")
+
+        except Exception as e:
             signal = "Håll"
+            analysis = {
+                "symbol": sym,
+                "signal": "Håll",
+                "error": str(e),
+                "timestamp": _now_utc().isoformat(),
+            }
 
         prev_sig = state["last_signal"].get(sym)
         drop_reason = None
@@ -326,6 +339,8 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
             update_signal_state(state, sym, signal)
             state["exclude_until"][sym] = (_now_utc() + timedelta(minutes=pass_ex_min)).isoformat()
             continue
+
+        # -------- Köp --------
 
         # -------- Köp --------
         if max_pos_per_symbol > 0:
