@@ -1,4 +1,7 @@
 #filters.py
+
+from app.core.market_profile import PROFILE
+
 def _safe_float(value, default=None):
     try:
         if value is None:
@@ -27,16 +30,17 @@ def is_probably_leveraged_or_inverse(stock_data):
     return any(hint in name for hint in LEVERAGED_ETF_HINTS)
 
 
-def passes_price_filter(stock_data, min_price=2.0):
+def passes_price_filter(stock_data, min_price=None):
+    min_price = PROFILE["min_price"] if min_price is None else min_price
     price = _safe_float(stock_data.get("latestClose"))
     if price is None:
-        return False, f"saknar pris"
+        return False, "saknar pris"
     if price < min_price:
         return False, f"pris under {min_price}"
     return True, None
 
-
-def passes_market_cap_filter(stock_data, min_market_cap=300_000_000):
+def passes_market_cap_filter(stock_data, min_market_cap=None):
+    min_market_cap = PROFILE["min_market_cap"] if min_market_cap is None else min_market_cap
     market_cap = _safe_float(stock_data.get("marketCap"))
     if market_cap is None:
         return False, "saknar market cap"
@@ -50,13 +54,24 @@ def passes_instrument_filter(stock_data):
         return False, "leveraged/inverse ETF"
     return True, None
 
+def passes_liquidity_filter(technicals, min_avg_cash_volume=None):
+    min_avg_cash_volume = (
+        PROFILE["min_avg_cash_volume"]
+        if min_avg_cash_volume is None
+        else min_avg_cash_volume
+    )
 
-def passes_liquidity_filter(technicals, min_avg_dollar_volume=5_000_000):
-    adv = _safe_float(technicals.get("avg_dollar_volume_20"))
+    adv = _safe_float(
+        technicals.get("avg_cash_volume_20")
+        or technicals.get("avg_dollar_volume_20")
+    )
+
     if adv is None:
-        return False, "saknar avg dollar volume"
-    if adv < min_avg_dollar_volume:
-        return False, f"avg dollar volume under {min_avg_dollar_volume}"
+        return False, "saknar avg cash volume"
+
+    if adv < min_avg_cash_volume:
+        return False, f"avg cash volume under {min_avg_cash_volume}"
+
     return True, None
 
 

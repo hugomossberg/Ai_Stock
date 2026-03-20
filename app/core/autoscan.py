@@ -4,12 +4,11 @@ import json
 import random
 import logging
 from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
 from pathlib import Path
 
 from app.core.signals import get_signal_analysis, execute_order
 from app.core.universe_manager import load_state, save_state, update_signal_state, rotate_universe
-from app.core.helpers import kill_switch_ok, us_market_open_now, is_dup
+from app.core.helpers import kill_switch_ok, market_open_now, is_dup
 from app.core.scanner import ensure_stock_info
 from app.config import (
     STOCK_INFO_PATH,
@@ -24,7 +23,6 @@ from app.config import (
 )
 
 log = logging.getLogger("autoscan")
-SE_TZ = ZoneInfo("Europe/Stockholm")
 
 
 def _env_bool(key: str, default: bool) -> bool:
@@ -258,7 +256,7 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
         getattr(ib_client, "pnl_realized_today", 0.0),
         getattr(ib_client, "pnl_unrealized_open", 0.0),
     )
-    market_ok = us_market_open_now()
+    market_ok = market_open_now()
     log.info(
         "MARKET_OPEN=%s | RISK_OK=%s (%s) | AUTOTRADE=%s",
         "JA" if market_ok else "NEJ",
@@ -281,10 +279,10 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
             signal = analysis["signal"]
             analysis["timestamp"] = _now_utc().isoformat()
 
-            with open("storage/signal_log.jsonl", "a", encoding="utf-8") as f:
+            with open("storage/signal_log.json", "a", encoding="utf-8") as f:
                 f.write(json.dumps(analysis, ensure_ascii=False) + "\n")
 
-            trim_jsonl("storage/signal_log.jsonl", keep_last=5000)
+            trim_jsonl("storage/signal_log.json", keep_last=5000)
 
         except Exception as e:
             signal = "Håll"
@@ -294,6 +292,12 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
                 "error": str(e),
                 "timestamp": _now_utc().isoformat(),
             }
+
+        raw_technicals = analysis.get("raw_technicals") or {}
+        if not raw_technicals:
+            log.info("[KEEP] %s → technicals saknas, behålls i universe", sym)
+            update_signal_state(state, sym, signal)
+            continue
 
         prev_sig = state["last_signal"].get(sym)
         drop_reason = None
