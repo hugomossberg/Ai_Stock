@@ -2,7 +2,6 @@ import os
 import json
 import random
 import logging
-import inspect
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -68,44 +67,7 @@ def _now_utc():
 
 
 async def _call_ensure_stock_info(ib_client, rows_target: int):
-    """
-    Kalla ensure_stock_info EN gång, robust mot olika signaturer:
-      - async/sync
-      - (ib=..., rows=...) eller (ib, rows) eller bara (rows) eller inga arg.
-    """
-    ib = getattr(ib_client, "ib", None) if ib_client else None
-
-    call_variants = []
-    if ib is not None:
-        call_variants.extend([
-            ((), {"ib": ib, "rows": rows_target}),
-            ((ib, rows_target), {}),
-            ((), {"ib": ib}),
-            ((ib,), {}),
-        ])
-
-    call_variants.extend([
-        ((), {"rows": rows_target}),
-        ((), {}),
-    ])
-
-    is_async = inspect.iscoroutinefunction(ensure_stock_info)
-    last_err = None
-
-    for args, kwargs in call_variants:
-        try:
-            if is_async:
-                return await ensure_stock_info(*args, **kwargs)
-            return ensure_stock_info(*args, **kwargs)
-        except TypeError as e:
-            last_err = e
-            continue
-        except Exception as e:
-            last_err = e
-            continue
-
-    if last_err:
-        raise last_err
+    return await ensure_stock_info(ib_client, min_count=rows_target)
 
 
 async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
