@@ -1,6 +1,5 @@
 # scanner.py
 import os, json, logging, time
-from datetime import datetime
 from zoneinfo import ZoneInfo
 from app.config import STOCK_INFO_PATH
 
@@ -48,6 +47,33 @@ def _fetch_yf_snapshot(ticker: str) -> dict:
     except Exception:
         pass
     return stock
+
+def _is_good_snapshot(stock: dict) -> tuple[bool, str | None]:
+    price = _to_float(stock.get("latestClose"))
+    market_cap = _to_float(stock.get("marketCap"))
+    name = (stock.get("name") or "").lower()
+    symbol = (stock.get("symbol") or "").upper()
+
+    leveraged_hints = ["2x", "3x", "ultra", "ultrapro", "daily", "bull", "bear", "short", "leveraged"]
+
+    if price is None:
+        return False, "saknar pris"
+    if price < 2:
+        return False, "pris under 2"
+
+    if market_cap is None:
+        return False, "saknar market cap"
+    if market_cap < 300_000_000:
+        return False, "market cap under 300M"
+
+    if symbol in {"TSLL", "TSLQ", "SQQQ"}:
+        return False, "leveraged/inverse ETF"
+
+    if any(hint in name for hint in leveraged_hints):
+        return False, "leveraged/inverse ETF"
+
+    return True, None
+
 
 def _write_stock_info(rows: list[dict]):
     with open(STOCK_INFO_PATH, "w", encoding="utf-8") as f:
@@ -109,16 +135,25 @@ async def refresh_stock_info(ib_client, limit: int = 50) -> list[dict]:
         tickers = _fallback_tickers()
 
     rows = []
-    for i, sym in enumerate(tickers[:limit], start=1):
+    for i, sym in enumerate(tickers[:limit * 3], start=1):
         try:
-            log.info("[scanner] Hämtar %s (%d/%d)", sym, i, min(len(tickers), limit))
-            rows.append(_fetch_yf_snapshot(sym))
+            log.info("[scanner] Hämtar %s (%d/%d)", sym, i, min(len(tickers), limit * 3))
+            stock = _fetch_yf_snapshot(sym)
+
+            ok, reason = _is_good_snapshot(stock)
+            if not ok:
+                log.info("[scanner] Skippar %s → %s", sym, reason)
+                continue
+
+            rows.append(stock)
+            if len(rows) >= limit:
+                break
+
             time.sleep(0.05)
         except Exception as e:
             log.warning("[scanner] Misslyckades med %s: %s", sym, e)
 
     if not rows:
-        # sista fallback: skapa tom men giltig fil
         rows = [{"symbol": s, "name": s} for s in tickers[:limit]]
 
     _write_stock_info(rows)

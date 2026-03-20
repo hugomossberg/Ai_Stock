@@ -1,3 +1,4 @@
+#decision.py
 def should_buy(analysis):
     if not analysis.get("filters", {}).get("allowed", True):
         return False

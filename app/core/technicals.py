@@ -1,23 +1,47 @@
+#technicals.py
 import math
 from typing import Optional
 
 import yfinance as yf
+import time
+
+_HISTORY_CACHE = {}
+_HISTORY_TTL_SEC = 300
 
 
 def fetch_price_history(symbol: str, period: str = "6mo", interval: str = "1d"):
     """
     Hämtar historiska candles via yfinance.
     Returnerar en pandas DataFrame eller None om tomt/fel.
+    Cachar kortvarigt för att minska upprepade nätanrop.
     """
+    cache_key = (symbol, period, interval)
+    now = time.time()
+
+    cached = _HISTORY_CACHE.get(cache_key)
+    if cached:
+        ts, df = cached
+        if now - ts < _HISTORY_TTL_SEC:
+            return df
+
     try:
-        ticker = yf.Ticker(symbol)
-        df = ticker.history(period=period, interval=interval, auto_adjust=False)
+        df = yf.download(
+            symbol,
+            period=period,
+            interval=interval,
+            auto_adjust=False,
+            progress=False,
+            threads=False,
+        )
         if df is None or df.empty:
+            _HISTORY_CACHE[cache_key] = (now, None)
             return None
+
+        _HISTORY_CACHE[cache_key] = (now, df)
         return df
     except Exception:
+        _HISTORY_CACHE[cache_key] = (now, None)
         return None
-
 
 def _safe_float(value, default=None):
     try:
