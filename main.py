@@ -7,6 +7,7 @@ import nest_asyncio
 from telegram.request import HTTPXRequest
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
 
+from app.core.technicals import set_ib_client
 from app.brokers.ibkr_client import ib_client
 from app.tg_bot.llm_client import LLMClient
 from app.tg_bot.router import TelegramRouter
@@ -15,6 +16,7 @@ from app.config import TELEGRAM_TOKEN, ADMIN_CHAT_ID, LOG_LEVEL, TWS_PORT
 
 load_dotenv()
 nest_asyncio.apply()
+set_ib_client(ib_client)
 
 # --- Logging: tydligt för aktier, dämpa httpx/telegram-spam ---
 root_level = LOG_LEVEL

@@ -1,10 +1,11 @@
+#scanner.py
 import json
 import logging
 import asyncio
 
 from app.config import STOCK_INFO_PATH
 from app.core.market_profile import PROFILE, MARKET_PROFILE
-import yfinance as yf
+
 
 log = logging.getLogger("scanner")
 
@@ -17,45 +18,69 @@ def _to_float(x, default=None):
     except Exception:
         return default
 
-
-def _fetch_yf_snapshot(ticker: str) -> dict:
-    t = yf.Ticker(ticker)
-    info = t.info or {}
-
-    latest_close = (
-        info.get("currentPrice")
-        or info.get("regularMarketPrice")
-        or info.get("previousClose")
-    )
-
-    stock = {
-        "symbol": ticker,
-        "name": info.get("shortName") or info.get("longName") or ticker,
-        "latestClose": latest_close,
-        "PE": info.get("trailingPE") or info.get("forwardPE"),
-        "marketCap": info.get("marketCap"),
-        "beta": info.get("beta"),
-        "trailingEps": info.get("trailingEps"),
-        "dividendYield": info.get("dividendYield"),
-        "sector": info.get("sector"),
-        "News": [],
-    }
+async def _fetch_ib_snapshot(ib_client, symbol: str) -> dict | None:
+    ticker = None
+    contract = None
 
     try:
-        news = t.news or []
-        for n in news[:3]:
-            stock["News"].append({
-                "content": {
-                    "title": n.get("title", ""),
-                    "summary": n.get("summary", "") or "",
-                    "publisher": n.get("publisher", ""),
-                    "link": n.get("link", ""),
-                }
-            })
-    except Exception:
-        pass
+        from ib_insync import Stock
 
-    return stock
+        contract = Stock(symbol, "SMART", "USD")
+        qualified = await ib_client.ib.qualifyContractsAsync(contract)
+        if not qualified:
+            log.warning("[scanner] Kunde inte kvalificera %s", symbol)
+            return None
+
+        contract = qualified[0]
+
+        details = await ib_client.ib.reqContractDetailsAsync(contract)
+        cd = details[0] if details else None
+
+        ib_client.ib.reqMarketDataType(3)  # delayed
+        ticker = ib_client.ib.reqMktData(contract, "", False, False)
+        await asyncio.sleep(2.5)
+
+        price_candidates = [
+            _to_float(getattr(ticker, "marketPrice", lambda: None)()),
+            _to_float(getattr(ticker, "last", None)),
+            _to_float(getattr(ticker, "close", None)),
+            _to_float(getattr(ticker, "bid", None)),
+            _to_float(getattr(ticker, "ask", None)),
+        ]
+        last_price = next((p for p in price_candidates if p is not None and p > 0), None)
+
+        name = symbol
+        sector = None
+        market_cap = None
+
+        if cd:
+            name = getattr(cd, "longName", None) or symbol
+
+        stock = {
+            "symbol": symbol,
+            "name": name,
+            "latestClose": last_price,
+            "PE": None,
+            "marketCap": market_cap,
+            "beta": None,
+            "trailingEps": None,
+            "dividendYield": None,
+            "sector": sector,
+            "News": [],
+        }
+
+        return stock
+
+    except Exception as e:
+        log.warning("[scanner] IB snapshot fail för %s: %s", symbol, e)
+        return None
+
+    finally:
+        if contract is not None:
+            try:
+                ib_client.ib.cancelMktData(contract)
+            except Exception:
+                pass
 
 
 def _is_good_snapshot(stock: dict) -> tuple[bool, str | None]:
@@ -77,9 +102,7 @@ def _is_good_snapshot(stock: dict) -> tuple[bool, str | None]:
     if price < min_price:
         return False, f"pris under {min_price}"
 
-    if market_cap is None:
-        return False, "saknar market cap"
-    if market_cap < min_market_cap:
+    if market_cap is not None and market_cap < min_market_cap:
         return False, f"market cap under {min_market_cap}"
 
     if symbol in {"TSLL", "TSLQ", "SQQQ"}:
@@ -91,7 +114,10 @@ def _is_good_snapshot(stock: dict) -> tuple[bool, str | None]:
     return True, None
 
 
+from pathlib import Path
+
 def _write_stock_info(rows: list[dict]):
+    Path(STOCK_INFO_PATH).parent.mkdir(parents=True, exist_ok=True)
     with open(STOCK_INFO_PATH, "w", encoding="utf-8") as f:
         json.dump(rows, f, ensure_ascii=False, indent=2)
 
@@ -162,7 +188,7 @@ def _normalize_se_symbol(symbol: str, local_symbol: str = "", long_name: str = "
     return f"{raw_symbol}.ST"
 
 
-def _to_yf_symbol(symbol: str, local_symbol: str = "", long_name: str = "") -> str:
+def _to_market_symbol(symbol: str, local_symbol: str = "", long_name: str = "") -> str:
     if PROFILE["currency"] == "SEK":
         if local_symbol.endswith(".ST"):
             return local_symbol.upper()
@@ -216,13 +242,13 @@ async def _ib_scanner(ib_client, limit: int) -> list[str]:
                 if not _looks_swedish(c, cd):
                     log.info("[scanner] Skippar ej svensk kandidat: %s", sym)
                     continue
-                yf_symbol = _to_yf_symbol(sym, local_symbol, long_name)
+                market_symbol = _to_market_symbol(sym, local_symbol, long_name)
             else:
-                yf_symbol = sym
+                market_symbo = sym
 
-            if yf_symbol not in seen:
-                seen.add(yf_symbol)
-                out.append(yf_symbol)
+            if market_symbo not in seen:
+                seen.add(market_symbo)
+                out.append(market_symbo)
 
             if len(out) >= max(10, limit * 3):
                 break
@@ -259,7 +285,9 @@ async def refresh_stock_info(ib_client, limit: int = 50) -> list[dict]:
     for i, sym in enumerate(tickers[: limit * 3], start=1):
         try:
             log.info("[scanner] Hämtar %s (%d/%d)", sym, i, max_fetch)
-            stock = _fetch_yf_snapshot(sym)
+            stock = await _fetch_ib_snapshot(ib_client, sym)
+            if not stock:
+                continue
 
             ok, reason = _is_good_snapshot(stock)
             if not ok:
@@ -271,7 +299,7 @@ async def refresh_stock_info(ib_client, limit: int = 50) -> list[dict]:
             if len(rows) >= limit:
                 break
 
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.2)
 
         except Exception as e:
             log.warning("[scanner] Misslyckades med %s: %s", sym, e)
@@ -282,7 +310,7 @@ async def refresh_stock_info(ib_client, limit: int = 50) -> list[dict]:
             log.warning("[scanner] Ingen ny data – behåller befintlig Stock_info.json (%d rader).", len(old))
             return old
 
-        log.warning("[scanner] Ingen ny data och ingen gammal fil finns.")
+        log.warning("[scanner] Ingen ny data och ingen gammal fil finns – skriver tom Stock_info.json.")
         return []
 
     _write_stock_info(rows)
@@ -292,7 +320,10 @@ async def refresh_stock_info(ib_client, limit: int = 50) -> list[dict]:
 
 async def ensure_stock_info(ib_client, min_count: int = 10) -> list[dict]:
     data = _read_stock_info()
-    if not isinstance(data, list) or len(data) < min_count:
-        log.info("[scanner] Stock_info.json saknas/korrupt/otillräcklig – bygger om…")
-        data = await refresh_stock_info(ib_client, limit=max(min_count, 12))
+
+    if isinstance(data, list) and len(data) >= max(4, min_count // 2):
+        return data
+
+    log.info("[scanner] Stock_info.json saknas/korrupt/otillräcklig – bygger om…")
+    data = await refresh_stock_info(ib_client, limit=min_count)
     return data or []

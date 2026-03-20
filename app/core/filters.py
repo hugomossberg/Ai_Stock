@@ -67,7 +67,7 @@ def passes_liquidity_filter(technicals, min_avg_cash_volume=None):
     )
 
     if adv is None:
-        return False, "saknar avg cash volume"
+        return True, "saknar avg cash volume"
 
     if adv < min_avg_cash_volume:
         return False, f"avg cash volume under {min_avg_cash_volume}"

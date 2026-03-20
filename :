@@ -1,1 +1,0 @@
-journalctl -u trading-bot.service -n 50 --no-pager

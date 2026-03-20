@@ -1,47 +1,30 @@
-#technicals.py
+# technicals.py
 import math
+import time
+import logging
 from typing import Optional
 
-import yfinance as yf
-import time
+import pandas as pd
+
+from app.core.market_profile import PROFILE, MARKET_PROFILE
+
+log = logging.getLogger("technicals")
 
 _HISTORY_CACHE = {}
 _HISTORY_TTL_SEC = 300
+_IB_CLIENT = None
 
 
-def fetch_price_history(symbol: str, period: str = "6mo", interval: str = "1d"):
+def set_ib_client(ib_client):
     """
-    Hämtar historiska candles via yfinance.
-    Returnerar en pandas DataFrame eller None om tomt/fel.
-    Cachar kortvarigt för att minska upprepade nätanrop.
+    Sätts från din app vid startup, t.ex. efter att IB kopplat upp.
+    Exempel:
+        from app.core.technicals import set_ib_client
+        set_ib_client(ib_client)
     """
-    cache_key = (symbol, period, interval)
-    now = time.time()
+    global _IB_CLIENT
+    _IB_CLIENT = ib_client
 
-    cached = _HISTORY_CACHE.get(cache_key)
-    if cached:
-        ts, df = cached
-        if now - ts < _HISTORY_TTL_SEC:
-            return df
-
-    try:
-        df = yf.download(
-            symbol,
-            period=period,
-            interval=interval,
-            auto_adjust=False,
-            progress=False,
-            threads=False,
-        )
-        if df is None or df.empty:
-            _HISTORY_CACHE[cache_key] = (now, None)
-            return None
-
-        _HISTORY_CACHE[cache_key] = (now, df)
-        return df
-    except Exception:
-        _HISTORY_CACHE[cache_key] = (now, None)
-        return None
 
 def _safe_float(value, default=None):
     try:
@@ -52,6 +35,132 @@ def _safe_float(value, default=None):
         return float(value)
     except Exception:
         return default
+
+
+def _period_to_ib_duration(period: str) -> str:
+    mapping = {
+        "1mo": "1 M",
+        "3mo": "3 M",
+        "6mo": "6 M",
+        "1y": "1 Y",
+        "2y": "2 Y",
+    }
+    return mapping.get(period, "6 M")
+
+
+def _interval_to_ib_bar_size(interval: str) -> str:
+    mapping = {
+        "1d": "1 day",
+        "1h": "1 hour",
+        "30m": "30 mins",
+        "15m": "15 mins",
+        "5m": "5 mins",
+        "1m": "1 min",
+    }
+    return mapping.get(interval, "1 day")
+
+
+def _build_contract(symbol: str):
+    try:
+        from ib_insync import Stock
+    except Exception as e:
+        log.warning("[technicals] Kunde inte importera ib_insync Stock: %s", e)
+        return None
+
+    symbol = (symbol or "").upper().strip()
+
+    if MARKET_PROFILE == "SE":
+        base_symbol = symbol.replace(".ST", "")
+        return Stock(base_symbol, "SMART", "SEK")
+    return Stock(symbol, "SMART", "USD")
+
+
+def _bars_to_df(bars):
+    if not bars:
+        return None
+
+    rows = []
+    for bar in bars:
+        rows.append({
+            "Date": getattr(bar, "date", None),
+            "Open": _safe_float(getattr(bar, "open", None)),
+            "High": _safe_float(getattr(bar, "high", None)),
+            "Low": _safe_float(getattr(bar, "low", None)),
+            "Close": _safe_float(getattr(bar, "close", None)),
+            "Volume": _safe_float(getattr(bar, "volume", None)),
+        })
+
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return None
+
+    needed = ["Open", "High", "Low", "Close", "Volume"]
+    for col in needed:
+        if col not in df.columns:
+            df[col] = None
+
+    return df
+
+
+def fetch_price_history(symbol: str, period: str = "6mo", interval: str = "1d"):
+    """
+    Hämtar historiska candles via IB istället för Yahoo.
+    Returnerar pandas DataFrame eller None.
+    Cachar kortvarigt för att minska upprepade anrop.
+    """
+    cache_key = (symbol, period, interval)
+    now = time.time()
+
+    cached = _HISTORY_CACHE.get(cache_key)
+    if cached:
+        ts, df = cached
+        if now - ts < _HISTORY_TTL_SEC:
+            return df
+
+    if _IB_CLIENT is None or not getattr(_IB_CLIENT, "ib", None):
+        log.warning("[technicals] IB client saknas för %s", symbol)
+        _HISTORY_CACHE[cache_key] = (now, None)
+        return None
+
+    try:
+        ib = _IB_CLIENT.ib
+        if not ib.isConnected():
+            log.warning("[technicals] IB ej ansluten för %s", symbol)
+            _HISTORY_CACHE[cache_key] = (now, None)
+            return None
+
+        contract = _build_contract(symbol)
+        if contract is None:
+            _HISTORY_CACHE[cache_key] = (now, None)
+            return None
+
+        duration_str = _period_to_ib_duration(period)
+        bar_size = _interval_to_ib_bar_size(interval)
+
+        bars = ib.reqHistoricalData(
+            contract,
+            endDateTime="",
+            durationStr=duration_str,
+            barSizeSetting=bar_size,
+            whatToShow="TRADES",
+            useRTH=True,
+            formatDate=1,
+            keepUpToDate=False,
+        )
+
+        df = _bars_to_df(bars)
+        if df is None or df.empty:
+            log.warning("[technicals] Ingen IB-prisdata för %s", symbol)
+            _HISTORY_CACHE[cache_key] = (now, None)
+            return None
+
+        _HISTORY_CACHE[cache_key] = (now, df)
+        return df
+
+    except Exception as e:
+        log.warning("[technicals] IB historical fail för %s: %s", symbol, e)
+        _HISTORY_CACHE[cache_key] = (now, None)
+        return None
 
 
 def compute_sma(series, window: int) -> Optional[float]:
@@ -72,14 +181,8 @@ def compute_rsi(series, window: int = 14) -> Optional[float]:
     avg_gain = gain.rolling(window=window).mean()
     avg_loss = loss.rolling(window=window).mean()
 
-    last_gain = avg_gain.iloc[-1]
-    last_loss = avg_loss.iloc[-1]
-
-    if last_loss is None:
-        return None
-
-    last_gain = _safe_float(last_gain)
-    last_loss = _safe_float(last_loss)
+    last_gain = _safe_float(avg_gain.iloc[-1])
+    last_loss = _safe_float(avg_loss.iloc[-1])
 
     if last_gain is None or last_loss is None:
         return None
@@ -124,13 +227,31 @@ def compute_momentum(series, lookback: int = 20) -> Optional[float]:
     return ((current / past) - 1.0) * 100.0
 
 
+def _empty_snapshot():
+    return {
+        "price": None,
+        "sma20": None,
+        "sma50": None,
+        "rsi14": None,
+        "atr14": None,
+        "atr_pct": None,
+        "volume": None,
+        "avg_volume_20": None,
+        "avg_dollar_volume_20": None,
+        "volume_ratio": None,
+        "momentum_20": None,
+        "momentum_60": None,
+    }
+
+
 def build_technical_snapshot(symbol: str):
     """
     Returnerar technicals-dict för symbolen.
+    Returnerar alltid en dict, aldrig {}.
     """
     df = fetch_price_history(symbol, period="6mo", interval="1d")
     if df is None or df.empty:
-        return {}
+        return _empty_snapshot()
 
     close = df["Close"]
     volume = df["Volume"]
@@ -145,6 +266,7 @@ def build_technical_snapshot(symbol: str):
     momentum_60 = compute_momentum(close, 60)
 
     volume_now = _safe_float(volume.iloc[-1])
+
     volume_ratio = None
     if volume_now is not None and avg_volume_20 not in (None, 0):
         volume_ratio = volume_now / avg_volume_20
