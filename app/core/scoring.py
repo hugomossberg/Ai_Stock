@@ -1,3 +1,4 @@
+#scoring.py
 from textblob import TextBlob
 
 
@@ -55,13 +56,13 @@ def score_pe(stock_data):
     if pe is None or pe <= 0:
         return 0
 
-    if pe < 10:
+    if pe < 12:
         return 2
-    if pe < 18:
+    if pe < 22:
         return 1
-    if pe <= 25:
+    if pe <= 40:
         return 0
-    if pe <= 35:
+    if pe <= 70:
         return -1
     return -2
 
@@ -205,16 +206,15 @@ def score_rsi(technicals):
     if rsi is None:
         return 0
 
-    if 50 <= rsi <= 65:
+    if 52 <= rsi <= 72:
         return 1
-    if 65 < rsi <= 75:
+    if 72 < rsi <= 80:
         return 0
-    if rsi > 75:
+    if rsi > 80:
         return -1
-    if rsi < 30:
+    if rsi < 28:
         return -1
     return 0
-
 
 def score_volume_spike(technicals):
     volume_ratio = _safe_float(technicals.get("volume_ratio"))
@@ -249,19 +249,18 @@ def score_momentum(technicals):
     score = 0
 
     if mom20 is not None:
-        if mom20 > 8:
+        if mom20 > 5:
             score += 1
-        elif mom20 < -8:
+        elif mom20 < -6:
             score -= 1
 
     if mom60 is not None:
-        if mom60 > 15:
+        if mom60 > 10:
             score += 1
-        elif mom60 < -15:
+        elif mom60 < -12:
             score -= 1
 
     return score
-
 
 def score_liquidity(technicals):
     adv = _safe_float(technicals.get("avg_dollar_volume_20"))

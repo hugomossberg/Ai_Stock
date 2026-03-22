@@ -13,7 +13,7 @@ from app.core.market_profile import PROFILE, MARKET_PROFILE
 log = logging.getLogger("technicals")
 
 _HISTORY_CACHE = {}
-_HISTORY_TTL_SEC = 300
+_HISTORY_TTL_SEC = 60
 _IB_CLIENT = None
 
 def _sim_enabled() -> bool:

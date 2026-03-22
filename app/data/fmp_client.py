@@ -1,29 +1,74 @@
 import os
+import time
 import requests
 from typing import Any
 from dotenv import load_dotenv
 
 load_dotenv()
 
+
 class FMPClient:
     BASE_URL = "https://financialmodelingprep.com/stable"
 
-    def __init__(self, api_key: str | None = None, timeout: int = 10):
+    def __init__(
+        self,
+        api_key: str | None = None,
+        timeout: int = 10,
+        max_retries: int = 2,
+        backoff_base: float = 1.5,
+        min_interval_sec: float = 0.12,
+    ):
         self.api_key = api_key or os.getenv("FMP_API_KEY")
         if not self.api_key:
             raise ValueError("FMP_API_KEY saknas")
+
         self.timeout = timeout
+        self.max_retries = max_retries
+        self.backoff_base = backoff_base
+        self.min_interval_sec = min_interval_sec
+
         self.session = requests.Session()
         self.session.headers.update({"apikey": self.api_key})
 
+        self._last_request_ts = 0.0
+
+    def _respect_min_interval(self):
+        now = time.time()
+        elapsed = now - self._last_request_ts
+        if elapsed < self.min_interval_sec:
+            time.sleep(self.min_interval_sec - elapsed)
+
     def _get(self, path: str, **params) -> Any:
         url = f"{self.BASE_URL}/{path.lstrip('/')}"
-        try:
-            r = self.session.get(url, params=params, timeout=self.timeout)
-            r.raise_for_status()
-            return r.json()
-        except requests.RequestException as e:
-            raise RuntimeError(f"FMP request failed: {path} params={params} error={e}") from e
+
+        last_error = None
+
+        for attempt in range(self.max_retries + 1):
+            self._respect_min_interval()
+
+            try:
+                r = self.session.get(url, params=params, timeout=self.timeout)
+                self._last_request_ts = time.time()
+
+                # 429 / 5xx -> retry med backoff
+                if r.status_code == 429 or 500 <= r.status_code < 600:
+                    wait = self.backoff_base ** attempt
+                    if attempt < self.max_retries:
+                        time.sleep(wait)
+                        continue
+
+                r.raise_for_status()
+                return r.json()
+
+            except requests.RequestException as e:
+                last_error = e
+
+                if attempt < self.max_retries:
+                    wait = self.backoff_base ** attempt
+                    time.sleep(wait)
+                    continue
+
+        raise RuntimeError(f"FMP request failed: {path} params={params} error={last_error}") from last_error
 
     # Quotes
     def quote(self, symbol: str):
@@ -35,9 +80,13 @@ class FMPClient:
         return data[0] if data else {}
 
     def batch_quote(self, symbols: list[str]):
+        if not symbols:
+            return []
         return self._get("batch-quote", symbols=",".join(symbols))
 
     def batch_quote_short(self, symbols: list[str]):
+        if not symbols:
+            return []
         return self._get("batch-quote-short", symbols=",".join(symbols))
 
     def aftermarket_quote(self, symbol: str):
@@ -45,6 +94,8 @@ class FMPClient:
         return data[0] if isinstance(data, list) and data else data
 
     def batch_aftermarket_quote(self, symbols: list[str]):
+        if not symbols:
+            return []
         return self._get("batch-aftermarket-quote", symbols=",".join(symbols))
 
     # Company
@@ -85,6 +136,7 @@ class FMPClient:
     def historical_eod_light(self, symbol: str):
         return self._get("historical-price-eod/light", symbol=symbol)
 
+    # Financial statements / ratios / metrics
     def income_statement(self, symbol: str, period: str = "annual", limit: int = 5):
         return self._get("income-statement", symbol=symbol, period=period, limit=limit)
 
@@ -101,7 +153,7 @@ class FMPClient:
     def key_metrics(self, symbol: str):
         data = self._get("key-metrics", symbol=symbol)
         return data[0] if isinstance(data, list) and data else data
-    
+
     def financial_growth(self, symbol: str):
         data = self._get("financial-growth", symbol=symbol)
         return data[0] if isinstance(data, list) and data else data

@@ -1,4 +1,3 @@
-#autoscan.py
 import json
 import logging
 import os
@@ -33,6 +32,33 @@ from app.core.universe_manager import (
 
 log = logging.getLogger("autoscan")
 
+# ===== Terminalfärger =====
+_USE_COLOR = not bool(os.getenv("NO_COLOR", "").strip())
+
+_RESET = "\033[0m"
+_BOLD = "\033[1m"
+_DIM = "\033[2m"
+
+_RED = "\033[31m"
+_GREEN = "\033[32m"
+_YELLOW = "\033[33m"
+_BLUE = "\033[34m"
+_CYAN = "\033[36m"
+_GRAY = "\033[90m"
+
+
+def _c(text: str, color: str = "", bold: bool = False, dim: bool = False) -> str:
+    if not _USE_COLOR:
+        return str(text)
+
+    prefix = ""
+    if bold:
+        prefix += _BOLD
+    if dim:
+        prefix += _DIM
+    prefix += color
+    return f"{prefix}{text}{_RESET}"
+
 
 def _env_bool(key: str, default: bool) -> bool:
     value = os.getenv(key, "").strip().lower()
@@ -58,6 +84,62 @@ def _to_float(x, default=None):
         return float(x)
     except Exception:
         return default
+
+
+def _fmt_price(value) -> str:
+    v = _to_float(value, None)
+    if v is None:
+        return "-"
+    return f"{v:.2f}"
+
+
+def _fmt_score_plain(value) -> str:
+    try:
+        v = int(value)
+    except Exception:
+        return "-"
+    return f"{v:+d}"
+
+
+def _fmt_score_color(value) -> str:
+    try:
+        v = int(value)
+    except Exception:
+        return "-"
+
+    if v <= -999:
+        return _c(f"{v}", _RED, bold=True)
+
+    if v > 0:
+        return _c(f"{v:+d}", _GREEN, bold=True)
+    if v < 0:
+        return _c(f"{v:+d}", _RED, bold=True)
+    return _c(f"{v:+d}", _YELLOW)
+
+
+def _log_section(title: str):
+    line = "-" * 78
+    log.info("%s", _c(line, _GRAY))
+    log.info("%s", _c(title, _CYAN, bold=True))
+    log.info("%s", _c(line, _GRAY))
+
+
+def _log_signal_line(signal: str, sym: str, qty: int, price, score):
+    sig = (signal or "").strip()
+
+    if sig == "Köp":
+        sig_txt = _c("KÖP ", _GREEN, bold=True)
+    elif sig == "Sälj":
+        sig_txt = _c("SÄLJ", _RED, bold=True)
+    else:
+        sig_txt = _c("HÅLL", _YELLOW, bold=True)
+
+    sym_txt = _c(f"{sym:<6}", _CYAN, bold=True)
+    qty_txt = _c(f"x{qty:<2}", _BLUE)
+    price_txt = _c(f"pris {_fmt_price(price):>7}", _GRAY)
+    score_txt = f"score {_fmt_score_color(score)}"
+
+    log.info("%s %s %s | %s | %s", sig_txt, sym_txt, qty_txt, price_txt, score_txt)
 
 
 def _normalize_stock(stock: dict) -> dict:
@@ -115,7 +197,7 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
         autotrade_enabled = False
         log.warning("[autoscan][SIM] Fake market mode aktivt – AUTOTRADE tvingas OFF")
 
-    entry_mode = os.getenv("ENTRY_MODE", "buy_only").strip().lower()  # buy_only | all
+    entry_mode = os.getenv("ENTRY_MODE", "buy_only").strip().lower()
     only_trade_on_signal_change = _env_bool("ONLY_TRADE_ON_SIGNAL_CHANGE", True)
     cooldown_min = _env_int("COOLDOWN_MIN", 30)
     max_pos_per_symbol = _env_int("MAX_POS_PER_SYMBOL", 0)
@@ -277,26 +359,27 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
     scan_set = _fill_scan_set(scan_set, banned=removed_this_pass)
     state["universe"] = list(scan_set)
 
+    replacement_pool_size = len(_available_replacements(scan_set, banned=removed_this_pass))
+
     if dropped_pre:
         log.info("[PRE-REMOVE] %s", ", ".join(dropped_pre))
     if added_pre:
         log.info("[PRE-ADD] %s", ", ".join(added_pre))
 
     log.info(
-        "POOL universe=%d all_candidates=%d scan_set=%d replacement_pool=%d",
+        "POOL universe=%d | all_candidates=%d | scan_set=%d | replacement_pool=%d",
         len(by_sym),
         len(all_candidates),
         len(scan_set),
-        len(_available_replacements(scan_set, banned=removed_this_pass)),
+        replacement_pool_size,
     )
 
+    _log_section(f"SCAN_SET [{len(scan_set)}] | replacement_pool={replacement_pool_size}")
     rows_for_log = []
     for sym in scan_set:
         raw = by_sym.get(sym) or {}
-        price = _to_float(raw.get("latestClose"), None)
-        price_str = "{:.2f}".format(price) if isinstance(price, (int, float)) and price is not None else "-"
-        rows_for_log.append(f"{sym}({price_str})")
-    log.info("SCAN_SET [%d]: %s", len(scan_set), ", ".join(rows_for_log))
+        rows_for_log.append(f"{sym}({_fmt_price(raw.get('latestClose'))})")
+    log.info("%s", ", ".join(rows_for_log))
 
     risk_ok, risk_reason = kill_switch_ok(
         getattr(ib_client, "pnl_realized_today", 0.0),
@@ -311,6 +394,11 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
         risk_reason or "-",
         "ON" if autotrade_enabled else "OFF",
     )
+
+    if not market_ok:
+        log.info("%s", _c("LÄGE: MARKET CLOSED → visar vad boten skulle göra", _GRAY))
+    elif not autotrade_enabled:
+        log.info("%s", _c("LÄGE: AUTOTRADE OFF → visar signaler utan order", _GRAY))
 
     initial_scan = list(scan_set)
 
@@ -346,10 +434,8 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
         analysis_row["symbol"] = sym
         analysis_row["name"] = raw.get("name") or raw.get("companyName") or sym
         scan_results.append(analysis_row)
-       
+
         prev_sig = state["last_signal"].get(sym)
-
-
 
         append_event(
             "signal_evaluated",
@@ -390,7 +476,6 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
         if entry_mode == "buy_only":
             if signal != "Köp":
                 drop_reason = f"ersätt pga {signal}"
-
         elif entry_mode == "all":
             if market_ok and signal == "Håll" and effective_hold_streak >= DROP_IF_HOLD_STREAK:
                 drop_reason = f"ersätt pga Håll-streak={effective_hold_streak}"
@@ -448,9 +533,16 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
             )
 
             continue
-            
+
         if only_trade_on_signal_change and prev_sig == signal:
-            log.info("[KEEP] %s → ingen signaländring", sym)
+            if debug_autotrade:
+                _log_signal_line(
+                    signal=signal,
+                    sym=sym,
+                    qty=auto_qty,
+                    price=raw_technicals.get("price"),
+                    score=analysis.get("total_score"),
+                )
             update_signal_state(state, sym, signal)
             continue
 
@@ -515,7 +607,8 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
                         orders_buy += 1
                         buys_today_rec["count"] = int(buys_today_rec.get("count", 0)) + 1
                         state["buys_today"][sym] = buys_today_rec
-                        log.info("[ORDER] KÖP %s x%d", sym, qty)
+
+                        _log_signal_line("Köp", sym, qty, raw_technicals.get("price"), analysis.get("total_score"))
 
                         orders_for_report.append(f"BUY submitted: {sym} x{qty}")
                         append_event(
@@ -529,7 +622,8 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
                         orders_sell += 1
                         sells_today_rec["count"] = int(sells_today_rec.get("count", 0)) + 1
                         state["sells_today"][sym] = sells_today_rec
-                        log.info("[ORDER] SÄLJ %s x%d", sym, qty)
+
+                        _log_signal_line("Sälj", sym, qty, raw_technicals.get("price"), analysis.get("total_score"))
 
                         orders_for_report.append(f"SELL submitted: {sym} x{qty}")
                         append_event(
@@ -585,7 +679,8 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
                             reason=f"replaced {sym}",
                         )
                 else:
-                    log.info("[KEEP] %s → ingen verklig order, behålls i universe", sym)
+                    if debug_autotrade:
+                        log.info("[KEEP] %s → ingen verklig order, behålls i universe", sym)
             else:
                 log.info("[SKIP] %s → duplicerad ordernyckel", sym)
         else:
@@ -607,14 +702,12 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
 
                 paper_symbols.append(f"{signal}:{sym}")
 
-                log.warning(
-                    "[PAPER-SIM] HADE %s %s x%d | sim_price=%s score=%s (%s)",
-                    signal.upper(),
-                    sym,
-                    qty,
-                    raw_technicals.get("price"),
-                    analysis.get("total_score"),
-                    ",".join(why) or "-",
+                _log_signal_line(
+                    signal=signal,
+                    sym=sym,
+                    qty=qty,
+                    price=raw_technicals.get("price"),
+                    score=analysis.get("total_score"),
                 )
 
                 append_event(
@@ -634,11 +727,15 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
                     f"PAPER-SIM: skulle {signal.lower()} {sym} x{qty} "
                     f"(price={raw_technicals.get('price')}, score={analysis.get('total_score')}, {','.join(why) or '-'})"
                 )
-              
-            elif debug_autotrade:
-                log.info("[SIM] %s %s x%d (%s)", signal.upper(), sym, qty, ",".join(why) or "-")
 
-            log.info("[KEEP] %s → ingen verklig order, behålls i universe", sym)
+            elif debug_autotrade:
+                _log_signal_line(
+                    signal=signal,
+                    sym=sym,
+                    qty=qty,
+                    price=raw_technicals.get("price"),
+                    score=analysis.get("total_score"),
+                )
 
         update_signal_state(state, sym, signal)
 
@@ -689,15 +786,39 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
             f"• Ordrar: Köp {orders_buy} · Sälj {orders_sell}",
             f"• Paper-sim: Köp {paper_buy} · Sälj {paper_sell}",
             f"• Byten: + {add_txt}  |  − {rem_txt}",
+            f"• Replacement pool: {replacement_pool_size}",
         ]
         await bot.send_message(admin_chat_id, "\n".join(msg))
 
-    if paper_symbols:
-        log.warning("[PAPER-SUMMARY] %s", ", ".join(paper_symbols))
+    buy_syms = [x.split(":", 1)[1] for x in paper_symbols if x.startswith("Köp:")]
+    sell_syms = [x.split(":", 1)[1] for x in paper_symbols if x.startswith("Sälj:")]
+    hold_count = max(0, len(scan_set) - len(buy_syms) - len(sell_syms))
+
+    _log_section("SCAN SUMMARY")
+    log.info(
+        "%s  %s  %s",
+        _c(f"Köp: {paper_buy}", _GREEN, bold=True),
+        _c(f"Sälj: {paper_sell}", _RED, bold=True),
+        _c(f"Håll: {hold_count}", _YELLOW, bold=True),
+    )
+
+    if buy_syms:
+        log.info("%s %s", _c("BUY :", _GREEN, bold=True), ", ".join(buy_syms))
+    if sell_syms:
+        log.info("%s %s", _c("SELL:", _RED, bold=True), ", ".join(sell_syms))
+
+    log.info(
+        "%s universe=%d | candidates=%d | replacements=%d",
+        _c("POOL:", _CYAN, bold=True),
+        len(by_sym),
+        len(all_candidates),
+        replacement_pool_size,
+    )
 
     if log_universe:
         log.info(
-            "BYTEN: + %s | - %s",
-            (", ".join(added) if added else "–"),
-            (", ".join(removed) if removed else "–"),
+            "%s + %s | - %s",
+            _c("BYTEN:", _CYAN, bold=True),
+            _c(((", ".join(added)) if added else "–"), _GREEN),
+            _c(((", ".join(removed)) if removed else "–"), _RED),
         )
