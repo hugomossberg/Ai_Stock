@@ -1,3 +1,4 @@
+#pipeline.py
 import json
 import logging
 from datetime import datetime, timezone
@@ -12,6 +13,10 @@ from app.config import (
 from app.core.scanner import ensure_stock_info
 from app.core.technicals import build_technical_snapshot
 from app.core.filters import precheck_stock
+
+from app.core.candidate_profile import build_candidate_profile
+from app.core.entry_engine import evaluate_entry
+
 from app.core.scoring import (
     score_price_trend,
     score_rsi,
@@ -179,43 +184,104 @@ def _run_stage3(stage2_passed: list[dict]) -> list[dict]:
     )
     return results
 
+
+def _action_priority(action: str) -> int:
+    order = {
+        "buy_ready": 5,
+        "watch": 4,
+        "hold_candidate": 3,
+        "avoid": 2,
+        "sell_candidate": 1,
+    }
+    return order.get(action, 0)
+
+
 def _build_final_candidates(stage3_passed: list[dict], limit: int = 10) -> list[dict]:
     final_candidates = []
 
     for item in stage3_passed[:limit]:
-        final_score = (
-            item.get("stage1_score", 0)
-            + item.get("stage2_score", 0)
-            + item.get("score", 0)
+        symbol = item.get("symbol")
+        name = item.get("name") or symbol
+        stock = item.get("stock") or {}
+        technicals = item.get("technicals") or {}
+
+        stage1_score = int(item.get("stage1_score", 0) or 0)
+        stage2_score = int(item.get("stage2_score", 0) or 0)
+        stage3_score = int(item.get("score", 0) or 0)
+
+        stage1_details = item.get("stage1_details", {}) or {}
+        stage2_details = item.get("stage2_details", {}) or {}
+        stage3_details = item.get("score_details", {}) or {}
+
+        candidate_score = stage1_score + stage2_score + stage3_score
+
+        profile = build_candidate_profile(
+            stock=stock,
+            technicals=technicals,
+            candidate_score=candidate_score,
+            stage1_details=stage1_details,
+            stage2_details=stage2_details,
+            stage3_details=stage3_details,
         )
 
-        signal = "Håll"
-        if final_score >= 4:
-            signal = "Köp"
-        elif final_score <= -3:
-            signal = "Sälj"
+        entry = evaluate_entry(
+            stock=stock,
+            technicals=technicals,
+            candidate_score=candidate_score,
+            profile=profile,
+        )
 
         final_candidates.append({
-            "symbol": item.get("symbol"),
-            "name": item.get("name"),
-            "final_score": final_score,
-            "signal": signal,
-            "stock": item.get("stock") or {},
-            "technicals": item.get("technicals") or {},
+            "symbol": symbol,
+            "name": name,
+            "candidate_score": candidate_score,
+            "entry_score": entry.get("entry_score", 0),
+            "final_score": candidate_score,
+            "signal": (
+                "Köp"
+                if entry.get("action") == "buy_ready"
+                else "Sälj"
+                if entry.get("action") == "sell_candidate"
+                else "Håll"
+            ),
+            "candidate_quality": profile.get("candidate_quality", "D"),
+            "setup_type": profile.get("setup_type", "low_quality_noise"),
+            "timing_state": entry.get("timing_state", "watch_only"),
+            "action": entry.get("action", "watch"),
+            "positive_flags": profile.get("positive_flags", []),
+            "risk_flags": profile.get("risk_flags", []),
+            "retention_score": profile.get("retention_score", 0),
+            "replacement_score": profile.get("replacement_score", 0),
+            "entry_reasons": entry.get("entry_reasons", []),
+            "stock": stock,
+            "technicals": technicals,
             "scores": {
-                "stage1": item.get("stage1_score", 0),
-                "stage2": item.get("stage2_score", 0),
-                "stage3": item.get("score", 0),
+                "stage1": stage1_score,
+                "stage2": stage2_score,
+                "stage3": stage3_score,
             },
             "score_details": {
-                "stage1": item.get("stage1_details", {}),
-                "stage2": item.get("stage2_details", {}),
-                "stage3": item.get("score_details", {}),
+                "stage1": stage1_details,
+                "stage2": stage2_details,
+                "stage3": stage3_details,
             },
         })
 
-    return final_candidates
+    final_candidates.sort(
 
+        key=lambda x: (
+            _action_priority(x.get("action")),
+            int(x.get("entry_score", 0) or 0),
+            int(x.get("candidate_score", 0) or 0),
+            int(x.get("retention_score", 0) or 0),
+        ),
+        reverse=True,
+    )
+
+    for idx, item in enumerate(final_candidates, start=1):
+        item["rank"] = idx
+
+    return final_candidates
 
 async def run_pipeline(ib_client) -> dict:
     rows_target = max(UNIVERSE_ROWS * CANDIDATE_MULTIPLIER, UNIVERSE_ROWS)
@@ -226,15 +292,15 @@ async def run_pipeline(ib_client) -> dict:
     stage1 = _run_stage1(universe)
     stage1_passed = [x for x in stage1 if x.get("passed")]
 
-    stage2 = _run_stage2(stage1_passed[:40])
+    stage2 = _run_stage2(stage1_passed[:80])
     stage2_passed = [x for x in stage2 if x.get("passed")]
 
-    stage3 = _run_stage3(stage2_passed[:30])
+    stage3 = _run_stage3(stage2_passed[:60])
     stage3_passed = [x for x in stage3 if x.get("passed")]
 
     final_candidates = _build_final_candidates(
         stage3_passed,
-        limit=max(UNIVERSE_ROWS * 3, 25)
+        limit=max(UNIVERSE_ROWS * 5, 40)
     )
 
     snapshot = {

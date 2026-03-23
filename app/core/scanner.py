@@ -200,8 +200,8 @@ async def refresh_stock_info(ib_client=None, limit: int = 50) -> list[dict]:
 
     rows: list[dict] = []
 
-    target_rows = min(max(limit * 3, 40), 100)
-    full_fetch_limit = min(max(limit + 20, 40), 90)
+    target_rows = min(max(limit * 5, 80), 150)
+    full_fetch_limit = min(max(limit + 60, 120), 150)
     selected = tickers[:full_fetch_limit]
 
     log.info(
@@ -286,6 +286,39 @@ async def refresh_stock_info(ib_client=None, limit: int = 50) -> list[dict]:
             except Exception as e:
                 log.warning("[scanner] FETCH %3d/%d %-6s | news fail: %s", i, len(selected), sym, e)
                 stock["News"] = []
+
+            if i <= 20:
+                log.info(
+                    "[scanner][DATA] %3d/%d %-6s | price=%s | PE=%s | EPS=%s | rev=%s | beta=%s | mcap=%s | news=%d",
+                    i,
+                    len(selected),
+                    sym,
+                    _fmt_num(stock.get("latestClose")),
+                    _fmt_num(stock.get("PE")),
+                    _fmt_num(stock.get("trailingEps")),
+                    _fmt_num(stock.get("revenueGrowth")),
+                    _fmt_num(stock.get("beta")),
+                    _fmt_num(stock.get("marketCap"), 0),
+                    len(stock.get("News", [])),
+                )
+
+                if stock.get("News"):
+                    top_titles = [
+                        ((n.get("content") or {}).get("title") or "-")
+                        for n in stock["News"][:3]
+                    ]
+                    log.info("[scanner][NEWS] %-6s | %s", sym, " || ".join(top_titles))
+                else:
+                    log.warning("[scanner][NEWS] %-6s | inga nyheter", sym)
+
+                if stock.get("revenueGrowth") is None:
+                    log.warning("[scanner][REV]  %-6s | revenueGrowth saknas", sym)
+
+                if stock.get("PE") is None:
+                    log.warning("[scanner][PE]   %-6s | PE saknas", sym)
+
+                if stock.get("trailingEps") is None:
+                    log.warning("[scanner][EPS]  %-6s | EPS saknas", sym)
 
             ok, reason = _is_good_snapshot(stock)
             if not ok:

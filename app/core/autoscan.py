@@ -178,6 +178,115 @@ def _dedupe_keep_order(items):
     return out
 
 
+def _quality_rank(value: str) -> int:
+    mapping = {
+        "A+": 5,
+        "A": 4,
+        "B": 3,
+        "C": 2,
+        "D": 1,
+    }
+    return mapping.get(str(value or "").upper(), 0)
+
+
+def _is_buy_action(action: str) -> bool:
+    return str(action or "").strip().lower() == "buy_ready"
+
+
+def _is_watch_action(action: str) -> bool:
+    return str(action or "").strip().lower() in {"watch", "hold_position", "hold_candidate"}
+
+def _is_exit_action(action: str) -> bool:
+    return str(action or "").strip().lower() in {"exit_ready", "sell_candidate"}
+
+def _is_allowed_replacement_action(action: str, held_pos: float = 0.0) -> bool:
+    action = str(action or "").strip().lower()
+
+    if action == "buy_ready":
+        return True
+
+    if action in {"watch", "hold_candidate", "hold_position"}:
+        return True
+
+    # exit/sell är bara relevant om vi faktiskt redan äger aktien
+    if action in {"exit_ready", "sell_candidate"} and held_pos > 0:
+        return True
+
+    if action == "avoid":
+        return False
+
+    return False
+
+
+def _update_watchlist(state: dict, sym: str, action: str, quality: str):
+    watchlist = _dedupe_keep_order(state.get("watchlist", []))
+
+    action = str(action or "").strip().lower()
+    quality_rank = _quality_rank(quality)
+
+    should_watch = action in {"watch", "hold_candidate"} and quality_rank >= 3
+
+    if should_watch and sym not in watchlist:
+        watchlist.append(sym)
+
+    if not should_watch and sym in watchlist:
+        watchlist.remove(sym)
+
+    state["watchlist"] = _dedupe_keep_order(watchlist)
+
+
+
+def _should_rotate_candidate(action: str, retention_score: int, quality: str, held_pos: float) -> tuple[bool, str | None]:
+    """
+    Avgör om en symbol i scan_set borde ersättas.
+    Viktigt:
+    - exit_ready ska INTE automatiskt roteras ut om vi faktiskt äger aktien;
+      då kan den vara relevant att hålla koll på för exits.
+    """
+    action = str(action or "").strip().lower()
+    quality_value = _quality_rank(quality)
+
+    if action == "avoid":
+        return True, "ersätt pga action=avoid"
+
+    if action in {"exit_ready", "sell_candidate"} and held_pos <= 0:
+        return True, f"ersätt pga {action} utan position"
+
+    if retention_score <= 4 and quality_value <= 2 and held_pos <= 0:
+        return True, f"ersätt pga retention_score={retention_score} quality={quality}"
+
+    if retention_score <= 2 and held_pos <= 0:
+        return True, f"ersätt pga låg retention_score={retention_score}"
+
+    return False, None
+
+
+def _replacement_is_meaningfully_better(current_analysis: dict, replacement_stock: dict) -> bool:
+    """
+    Byt bara ut om ersättaren faktiskt är bättre.
+    """
+    current_retention = int(current_analysis.get("retention_score", current_analysis.get("total_score", 0)) or 0)
+    current_quality = _quality_rank(current_analysis.get("candidate_quality"))
+    current_action = str(current_analysis.get("action") or "").strip().lower()
+
+    repl_analysis = _build_pipeline_analysis(replacement_stock or {})
+    repl_replacement_score = int(repl_analysis.get("replacement_score", repl_analysis.get("total_score", 0)) or 0)
+    repl_quality = _quality_rank(repl_analysis.get("candidate_quality"))
+    repl_action = str(repl_analysis.get("action") or "").strip().lower()
+
+    if repl_action == "buy_ready" and current_action not in {"buy_ready", "hold_position"}:
+        return True
+
+    if repl_replacement_score >= current_retention + 3:
+        return True
+
+    if repl_quality > current_quality and repl_replacement_score >= current_retention + 1:
+        return True
+
+    return False
+
+
+
 def _build_pipeline_analysis(stock: dict) -> dict:
     sym = (stock.get("symbol") or "").upper().strip()
 
@@ -191,12 +300,23 @@ def _build_pipeline_analysis(stock: dict) -> dict:
         "symbol": sym,
         "signal": pipeline_signal,
         "total_score": pipeline_score,
+        "candidate_score": stock.get("_pipeline_candidate_score", pipeline_score),
+        "entry_score": stock.get("_pipeline_entry_score", 0),
+        "candidate_quality": stock.get("_pipeline_candidate_quality", "C"),
+        "setup_type": stock.get("_pipeline_setup_type", "unknown"),
+        "timing_state": stock.get("_pipeline_timing_state", "unknown"),
+        "action": stock.get("_pipeline_action", "watch"),
+        "positive_flags": stock.get("_pipeline_positive_flags") or [],
+        "risk_flags": stock.get("_pipeline_risk_flags") or [],
+        "entry_reasons": stock.get("_pipeline_entry_reasons") or [],
+        "retention_score": stock.get("_pipeline_retention_score", pipeline_score),
+        "replacement_score": stock.get("_pipeline_replacement_score", pipeline_score),
+        "rank": stock.get("_pipeline_rank"),
         "raw_technicals": pipeline_technicals,
         "pipeline_scores": pipeline_scores,
         "pipeline_score_details": pipeline_score_details,
         "timestamp": _now_utc().isoformat(),
     }
-
 
 
 async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
@@ -225,13 +345,14 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
     max_order_value = _to_float(os.getenv("MAX_ORDER_VALUE_USD", "30"), 30.0)
 
     log.info(
-        "CFG UNIVERSE_ROWS=%s CAND_MULT=%s AUTOTRADE=%s ENTRY_MODE=%s PASS_EX_MIN=%s EXCLUDE_BOUGHT_MIN=%s",
+        "CFG UNIVERSE_ROWS=%s CAND_MULT=%s AUTOTRADE=%s ENTRY_MODE=%s PASS_EX_MIN=%s EXCLUDE_BOUGHT_MIN=%s MAX_ORDER_VALUE=%s",
         universe_rows,
         candidate_mult,
         autotrade_enabled,
         entry_mode,
         pass_ex_min,
         exclude_bought_min,
+        max_order_value,
     )
 
     if not autoscan_enabled:
@@ -244,7 +365,7 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
         return
 
     try:
-        pipeline_snapshot = await run_pipeline(ib_client)
+        await run_pipeline(ib_client)
     except Exception as e:
         log.error("[autoscan] Kunde inte köra pipeline: %s", e)
         return
@@ -292,6 +413,7 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
     state.setdefault("buys_today", {})
     state.setdefault("sells_today", {})
     state.setdefault("hold_streak", {})
+    state.setdefault("watchlist", [])
 
     today = _now_utc().date().isoformat()
 
@@ -330,11 +452,25 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
         stock = dict(s.get("stock") or {})
         stock["symbol"] = sym
         stock["name"] = s.get("name") or stock.get("name") or sym
+
         stock["_pipeline_signal"] = s.get("signal")
         stock["_pipeline_final_score"] = s.get("final_score")
         stock["_pipeline_technicals"] = s.get("technicals") or {}
         stock["_pipeline_scores"] = s.get("scores") or {}
         stock["_pipeline_score_details"] = s.get("score_details") or {}
+
+        stock["_pipeline_candidate_score"] = s.get("candidate_score", s.get("final_score", 0))
+        stock["_pipeline_entry_score"] = s.get("entry_score", 0)
+        stock["_pipeline_candidate_quality"] = s.get("candidate_quality", "C")
+        stock["_pipeline_setup_type"] = s.get("setup_type", "unknown")
+        stock["_pipeline_timing_state"] = s.get("timing_state", "unknown")
+        stock["_pipeline_action"] = s.get("action", "watch")
+        stock["_pipeline_positive_flags"] = s.get("positive_flags") or []
+        stock["_pipeline_risk_flags"] = s.get("risk_flags") or []
+        stock["_pipeline_entry_reasons"] = s.get("entry_reasons") or []
+        stock["_pipeline_retention_score"] = s.get("retention_score", s.get("final_score", 0))
+        stock["_pipeline_replacement_score"] = s.get("replacement_score", s.get("final_score", 0))
+        stock["_pipeline_rank"] = s.get("rank")
 
         by_sym[sym] = stock
 
@@ -370,7 +506,6 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
     paper_buy = 0
     paper_sell = 0
     paper_symbols = []
-
     rotations_out = []
     rotations_in = []
     orders_for_report = []
@@ -379,14 +514,42 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
     def _available_replacements(current_scan, banned=None):
         banned = banned or set()
         current_set = set(current_scan)
-        return [
-            s for s in all_candidates
-            if s not in current_set
-            and s not in banned
-            and s not in held
-            and s not in open_buy_syms
-            and not _is_excluded(s)
-        ]
+
+        pool = []
+        for s in all_candidates:
+            if s in current_set:
+                continue
+            if s in banned:
+                continue
+            if s in held:
+                continue
+            if s in open_buy_syms:
+                continue
+            if _is_excluded(s):
+                continue
+
+            stock = by_sym.get(s) or {}
+            analysis = _build_pipeline_analysis(stock)
+            action = str(analysis.get("action") or "").strip().lower()
+            held_pos = float(held.get(s, 0.0))
+
+            if not _is_allowed_replacement_action(action, held_pos):
+                continue
+
+            pool.append(s)
+
+        pool.sort(
+            key=lambda s: (
+                1 if str((_build_pipeline_analysis(by_sym.get(s) or {})).get("action", "")).lower() == "buy_ready" else 0,
+                int((_build_pipeline_analysis(by_sym.get(s) or {})).get("replacement_score", 0) or 0),
+                int((_build_pipeline_analysis(by_sym.get(s) or {})).get("entry_score", 0) or 0),
+                _quality_rank((_build_pipeline_analysis(by_sym.get(s) or {})).get("candidate_quality")),
+                int((_build_pipeline_analysis(by_sym.get(s) or {})).get("total_score", 0) or 0),
+            ),
+            reverse=True,
+        )
+
+        return pool
 
     def _take_replacement(current_scan, banned=None):
         pool = _available_replacements(current_scan, banned=banned)
@@ -461,6 +624,34 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
             analysis = _build_pipeline_analysis(stock)
             signal = analysis["signal"]
 
+            score = int(analysis.get("total_score", 0) or 0)
+            retention_score = int(analysis.get("retention_score", score) or 0)
+            replacement_score = int(analysis.get("replacement_score", score) or 0)
+            candidate_quality = analysis.get("candidate_quality", "C")
+            timing_state = str(analysis.get("timing_state") or "unknown")
+            action = str(analysis.get("action") or "watch")
+            current_pos = float(held.get(sym, 0.0))
+
+            effective_signal = signal
+            if _is_buy_action(action):
+                effective_signal = "Köp"
+            elif _is_exit_action(action):
+                effective_signal = "Sälj"
+            elif _is_watch_action(action):
+                effective_signal = "Håll"
+
+            
+            log.info(
+                "[ENTRY] %s → action=%s | quality=%s | entry_score=%s | reasons=%s",
+                sym,
+                action,
+                candidate_quality,
+                analysis.get("entry_score"),
+                ",".join(analysis.get("entry_reasons", [])),
+            )
+
+            _update_watchlist(state, sym, action, candidate_quality)
+
             with open(str(SIGNAL_LOG_PATH), "a", encoding="utf-8") as f:
                 f.write(json.dumps(analysis, ensure_ascii=False) + "\n")
 
@@ -468,9 +659,25 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
 
         except Exception as e:
             signal = "Håll"
+            score = 0
+            retention_score = 0
+            replacement_score = 0
+            candidate_quality = "C"
+            timing_state = "unknown"
+            action = "watch"
+            current_pos = float(held.get(sym, 0.0))
+            effective_signal = "Håll"
+
             analysis = {
                 "symbol": sym,
                 "signal": "Håll",
+                "total_score": 0,
+                "candidate_quality": candidate_quality,
+                "timing_state": timing_state,
+                "action": action,
+                "retention_score": retention_score,
+                "replacement_score": replacement_score,
+                "raw_technicals": {},
                 "error": str(e),
                 "timestamp": _now_utc().isoformat(),
             }
@@ -481,6 +688,7 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
         analysis_row = dict(analysis)
         analysis_row["symbol"] = sym
         analysis_row["name"] = raw.get("name") or raw.get("companyName") or sym
+        analysis_row["held_position"] = float(held.get(sym, 0.0))
         scan_results.append(analysis_row)
 
         prev_sig = state["last_signal"].get(sym)
@@ -496,7 +704,7 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
             },
         )
 
-        if signal == "Köp" and prev_sig != "Köp":
+        if effective_signal == "Köp" and prev_sig != "Köp":
             append_event(
                 "buy_signal",
                 symbol=sym,
@@ -509,39 +717,65 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
 
         if sym == "BRK-B" and not raw_technicals.get("price"):
             log.info("[KEEP] %s → IB technicals saknas ännu, behålls tillfälligt", sym)
-            update_signal_state(state, sym, signal)
+            update_signal_state(state, sym, effective_signal)
             continue
 
         if not raw_technicals:
             log.info("[KEEP] %s → technicals saknas, behålls i universe", sym)
-            update_signal_state(state, sym, signal)
+            update_signal_state(state, sym, effective_signal)
             continue
-
         drop_reason = None
         hold_streak = int(state.get("hold_streak", {}).get(sym, 0))
-        effective_hold_streak = hold_streak + 1 if signal == "Håll" else 0
-        score = int(analysis.get("total_score", 0) or 0)
+        effective_hold_streak = hold_streak + 1 if effective_signal == "Håll" else 0
+        rotate_by_profile, rotate_reason = _should_rotate_candidate(
+            action=action,
+            retention_score=retention_score,
+            quality=candidate_quality,
+            held_pos=current_pos,
+        )
 
         if entry_mode == "buy_only":
-            if signal != "Köp":
-                drop_reason = f"ersätt pga {signal}"
+            if not _is_buy_action(action):
+                drop_reason = f"ersätt pga action={action}"
 
         elif entry_mode == "all":
-            if signal == "Sälj":
-                drop_reason = "ersätt pga Sälj"
-            elif market_ok and signal == "Håll" and effective_hold_streak >= DROP_IF_HOLD_STREAK:
-                drop_reason = f"ersätt pga Håll-streak={effective_hold_streak}"
-            elif score <= -3:
+            if rotate_by_profile:
+                drop_reason = rotate_reason
+            elif (
+                market_ok
+                and action == "watch"
+                and effective_hold_streak >= DROP_IF_HOLD_STREAK
+                and current_pos <= 0
+                and retention_score <= 6
+            ):
+                drop_reason = f"ersätt pga watch-streak={effective_hold_streak}"
+            elif score <= -3 and current_pos <= 0:
                 drop_reason = f"ersätt pga låg score={score}"
 
         if drop_reason:
             candidate_scan = [s for s in scan_set if s != sym]
             repl = _take_replacement(candidate_scan, banned=removed_this_pass | {sym})
-            log.info("[ROTATE-CHECK] %s → %s | signal=%s | score=%s", sym, drop_reason, signal, score)
+
+            log.info(
+                "[ROTATE-CHECK] %s → %s | signal=%s | action=%s | score=%s | retention=%s | repl_score=%s",
+                sym,
+                drop_reason,
+                signal,
+                action,
+                score,
+                retention_score,
+                replacement_score,
+            )
 
             if not repl:
                 log.info("[KEEP] %s → %s men ingen ersättare finns", sym, drop_reason)
-                update_signal_state(state, sym, signal)
+                update_signal_state(state, sym, effective_signal)
+                continue
+
+            repl_raw = by_sym.get(repl) or {}
+            if not _replacement_is_meaningfully_better(analysis, repl_raw):
+                log.info("[KEEP] %s → ersättare %s är inte tydligt bättre", sym, repl)
+                update_signal_state(state, sym, effective_signal)
                 continue
 
             if sym in scan_set:
@@ -565,7 +799,7 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
                 reason=drop_reason,
             )
 
-            update_signal_state(state, sym, signal)
+            update_signal_state(state, sym, effective_signal)
             state["exclude_until"][sym] = (_now_utc() + timedelta(minutes=pass_ex_min)).isoformat()
             reset_symbol_rotation_state(state, sym)
 
@@ -589,28 +823,29 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
 
             continue
 
-        if only_trade_on_signal_change and prev_sig == signal:
+
+        if only_trade_on_signal_change and prev_sig == effective_signal:
             if debug_autotrade:
                 _log_signal_line(
-                    signal=signal,
+                    signal=effective_signal,
                     sym=sym,
                     qty=auto_qty,
                     price=raw_technicals.get("price"),
                     score=analysis.get("total_score"),
                 )
-            update_signal_state(state, sym, signal)
+            update_signal_state(state, sym, effective_signal)
             continue
 
         buys_today_rec = _counter("buys_today", sym)
         sells_today_rec = _counter("sells_today", sym)
 
-        if signal == "Köp" and max_buys_per_day > 0 and buys_today_rec["count"] >= max_buys_per_day:
-            update_signal_state(state, sym, signal)
+        if effective_signal == "Köp" and max_buys_per_day > 0 and buys_today_rec["count"] >= max_buys_per_day:
+            update_signal_state(state, sym, effective_signal)
             log.info("[SKIP] %s → MAX_BUYS_PER_DAY nådd", sym)
             continue
 
-        if signal == "Sälj" and max_sells_per_day > 0 and sells_today_rec["count"] >= max_sells_per_day:
-            update_signal_state(state, sym, signal)
+        if effective_signal == "Sälj" and max_sells_per_day > 0 and sells_today_rec["count"] >= max_sells_per_day:
+            update_signal_state(state, sym, effective_signal)
             log.info("[SKIP] %s → MAX_SELLS_PER_DAY nådd", sym)
             continue
 
@@ -618,19 +853,23 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
         qty = auto_qty
         trade = None
 
+        if effective_signal == "Sälj" and current_pos <= 0:
+            log.info("[INFO] %s → exit/bearish analys, men ingen position finns. Ingen säljåtgärd.", sym)
+            effective_signal = "Håll"
+
         if autotrade_enabled and risk_ok and market_ok and not _in_cooldown(sym):
-            action_signal = signal
+            action_signal = effective_signal
 
             if action_signal == "Sälj" and current_pos <= 0:
                 log.info("[SKIP] %s → Sälj ignoreras, ingen position att stänga", sym)
-                update_signal_state(state, sym, signal)
+                update_signal_state(state, sym, effective_signal)
                 continue
 
             if action_signal == "Köp" and max_pos_per_symbol > 0:
                 remaining_cap = max(0, max_pos_per_symbol - int(current_pos))
                 if remaining_cap <= 0:
                     log.info("[SKIP] %s → MAX_POS_PER_SYMBOL nådd", sym)
-                    update_signal_state(state, sym, signal)
+                    update_signal_state(state, sym, effective_signal)
                     continue
                 qty = min(auto_qty, remaining_cap)
 
@@ -638,7 +877,7 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
                 qty = min(auto_qty, int(current_pos))
                 if qty <= 0:
                     log.info("[SKIP] %s → ingen säljbar position", sym)
-                    update_signal_state(state, sym, signal)
+                    update_signal_state(state, sym, effective_signal)
                     continue
 
             price_now = _to_float(raw_technicals.get("price"), 0) or _to_float(raw.get("latestClose"), 0)
@@ -647,7 +886,7 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
                 est_value = price_now * qty
                 if est_value > max_order_value:
                     log.info("[SKIP] %s → ordervärde %.2f över max %.2f", sym, est_value, max_order_value)
-                    update_signal_state(state, sym, signal)
+                    update_signal_state(state, sym, effective_signal)
                     continue
 
             key = f"{sym}:{action_signal}:{int(qty)}"
@@ -758,16 +997,16 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
             if _in_cooldown(sym):
                 why.append("cooldown")
 
-            if signal in {"Köp", "Sälj"}:
-                if signal == "Köp":
+            if effective_signal in {"Köp", "Sälj"}:
+                if effective_signal == "Köp":
                     paper_buy += 1
-                elif signal == "Sälj":
+                elif effective_signal == "Sälj":
                     paper_sell += 1
 
-                paper_symbols.append(f"{signal}:{sym}")
+                paper_symbols.append(f"{effective_signal}:{sym}")
 
                 _log_signal_line(
-                    signal=signal,
+                    signal=effective_signal,
                     sym=sym,
                     qty=qty,
                     price=raw_technicals.get("price"),
@@ -779,29 +1018,36 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
                     symbol=sym,
                     name=raw.get("name") or raw.get("companyName") or sym,
                     data={
-                        "signal": signal,
+                        "signal": effective_signal,
+                        "pipeline_signal": signal,
+                        "action": action,
+                        "timing_state": timing_state,
+                        "candidate_quality": candidate_quality,
                         "qty": qty,
                         "reason": ",".join(why) or "-",
                         "score": analysis.get("total_score"),
+                        "retention_score": retention_score,
+                        "replacement_score": replacement_score,
                         "price": raw_technicals.get("price"),
                     },
                 )
 
                 orders_for_report.append(
-                    f"PAPER-SIM: skulle {signal.lower()} {sym} x{qty} "
-                    f"(price={raw_technicals.get('price')}, score={analysis.get('total_score')}, {','.join(why) or '-'})"
+                    f"PAPER-SIM: skulle {effective_signal.lower()} {sym} x{qty} "
+                    f"(action={action}, timing={timing_state}, quality={candidate_quality}, "
+                    f"price={raw_technicals.get('price')}, score={analysis.get('total_score')}, {','.join(why) or '-'})"
                 )
 
             elif debug_autotrade:
                 _log_signal_line(
-                    signal=signal,
+                    signal=effective_signal,
                     sym=sym,
                     qty=qty,
                     price=raw_technicals.get("price"),
                     score=analysis.get("total_score"),
                 )
 
-        update_signal_state(state, sym, signal)
+        update_signal_state(state, sym, effective_signal)
 
     scan_set = _fill_scan_set(scan_set, banned=removed_this_pass)
 
@@ -857,6 +1103,9 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
     buy_syms = [x.split(":", 1)[1] for x in paper_symbols if x.startswith("Köp:")]
     sell_syms = [x.split(":", 1)[1] for x in paper_symbols if x.startswith("Sälj:")]
     hold_count = max(0, len(scan_set) - len(buy_syms) - len(sell_syms))
+
+    if state.get("watchlist"):
+        log.info("[WATCHLIST] %s", ", ".join(state["watchlist"]))       
 
     _log_section("SCAN SUMMARY")
     log.info(
