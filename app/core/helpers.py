@@ -45,19 +45,44 @@ def market_open_now(now_local: datetime | None = None) -> bool:
     if now_local.weekday() >= 5:
         return False
 
-    start = now_local.replace(
+    allow_extended = os.getenv("ALLOW_EXTENDED_HOURS", "0").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+
+    regular_start = now_local.replace(
         hour=PROFILE["open_hour"],
         minute=PROFILE["open_minute"],
         second=0,
         microsecond=0,
     )
-    end = now_local.replace(
+    regular_end = now_local.replace(
         hour=PROFILE["close_hour"],
         minute=PROFILE["close_minute"],
         second=0,
         microsecond=0,
     )
-    return start <= now_local <= end
+
+    if regular_start <= now_local <= regular_end:
+        return True
+
+    if allow_extended:
+        premarket_start = now_local.replace(
+            hour=4,
+            minute=0,
+            second=0,
+            microsecond=0,
+        )
+        afterhours_end = now_local.replace(
+            hour=20,
+            minute=0,
+            second=0,
+            microsecond=0,
+        )
+
+        if premarket_start <= now_local <= afterhours_end:
+            return True
+
+    return False
 
 _DUP_CACHE = {}
 _DUP_TTL_SEC = int(os.getenv("DUP_TTL_SEC", "45"))

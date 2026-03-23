@@ -7,11 +7,12 @@ from pathlib import Path
 from app.config import STOCK_INFO_PATH
 from app.core.market_profile import PROFILE, MARKET_PROFILE
 from app.data.market_data import MarketDataService
+from app.core.helpers import market_open_now
 
 log = logging.getLogger("scanner")
 md = MarketDataService()
 
-_STOCK_INFO_MAX_AGE_MIN = 60
+
 _BAD_IB_SYMBOLS = {"CCIV", "TWTR", "NETE"}
 
 
@@ -44,6 +45,35 @@ def _write_stock_info(rows: list[dict]):
         json.dump(rows, f, ensure_ascii=False, indent=2)
 
 
+def _built_today(path: str) -> bool:
+    p = Path(path)
+    if not p.exists():
+        return False
+
+    try:
+        mtime = datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc).date()
+        today = datetime.now(timezone.utc).date()
+        return mtime == today
+    except Exception:
+        return False
+
+def should_rebuild_stock_info(path: str, min_rows: int, current_rows: int) -> tuple[bool, str]:
+    p = Path(path)
+
+    if not p.exists():
+        return True, "saknas"
+
+    if market_open_now():
+        return False, "marknaden öppen, använd befintlig fil"
+
+    if not _built_today(path):
+        return True, "ny dag före öppning"
+
+    if current_rows < min_rows:
+        return True, f"otillräcklig ({current_rows}/{min_rows})"
+
+    return False, "fil ok"
+
 def _read_stock_info() -> list[dict] | None:
     try:
         with open(STOCK_INFO_PATH, "r", encoding="utf-8") as f:
@@ -51,17 +81,6 @@ def _read_stock_info() -> list[dict] | None:
         return data if isinstance(data, list) else None
     except Exception:
         return None
-
-
-def _stock_info_is_stale(max_age_minutes: int = _STOCK_INFO_MAX_AGE_MIN) -> bool:
-    p = Path(STOCK_INFO_PATH)
-    if not p.exists():
-        return True
-    try:
-        age_seconds = datetime.now(timezone.utc).timestamp() - p.stat().st_mtime
-        return age_seconds > (max_age_minutes * 60)
-    except Exception:
-        return True
 
 
 def _fallback_tickers() -> list[str]:
@@ -275,7 +294,7 @@ async def refresh_stock_info(ib_client=None, limit: int = 50) -> list[dict]:
                 fundamentals = {}
 
             try:
-                financials_limit = _env_int("SCANNER_FINANCIALS_LIMIT", 30)
+                financials_limit = _env_int("SCANNER_FINANCIALS_LIMIT", 100)
                 if i <= financials_limit:
                     financials = md.get_financials(sym)
                 else:
@@ -329,18 +348,28 @@ async def refresh_stock_info(ib_client=None, limit: int = 50) -> list[dict]:
 async def ensure_stock_info(ib_client=None, min_count: int = 10) -> list[dict]:
     data = _read_stock_info()
     minimum_usable = max(10, min(min_count, 30))
+    current_rows = len(data) if isinstance(data, list) else 0
 
-    if (
-        isinstance(data, list)
-        and len(data) >= minimum_usable
-        and not _stock_info_is_stale()
-    ):
+    needs_rebuild, rebuild_reason = should_rebuild_stock_info(
+        path=str(STOCK_INFO_PATH),
+        min_rows=minimum_usable,
+        current_rows=current_rows,
+    )
+
+    if not needs_rebuild and isinstance(data, list):
+        log.info(
+            "[scanner] Stock_info.json OK – %s (%s rows)",
+            rebuild_reason,
+            len(data),
+        )
         return data
 
     log.info(
-        "[scanner] Stock_info.json saknas/korrupt/gammal/otillräcklig (%s/%s) – bygger om…",
-        len(data) if isinstance(data, list) else 0,
+        "[scanner] Stock_info rebuild: %s (%s/%s)",
+        rebuild_reason,
+        current_rows,
         minimum_usable,
     )
+
     data = await refresh_stock_info(ib_client=ib_client, limit=min_count)
     return data or []

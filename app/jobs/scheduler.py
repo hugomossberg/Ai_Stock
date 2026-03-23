@@ -27,7 +27,7 @@ def setup_jobs(app: Application, ib_client):
         name="autoscan_job",
         job_kwargs={"misfire_grace_time": 30},
     )
-    log.info("Autoscan schemalagd var %d min.", every_min)
+    log.info("Autoscan scheduled every %d minutes.", every_min)
 
     # Premarket dagligen (ET)
     et_str = os.getenv("PREMARKET_ET", "09:10")
@@ -44,4 +44,4 @@ def setup_jobs(app: Application, ib_client):
         name="premarket_job",
         job_kwargs={"misfire_grace_time": 300},
     )
-    log.info("Premarket schemalagd %02d:%02d ET (mån–fre).", hh, mm)
+    

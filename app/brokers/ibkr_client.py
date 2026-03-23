@@ -1,4 +1,4 @@
-from ib_insync import IB, ScannerSubscription, Stock, MarketOrder
+from ib_insync import IB, Stock, MarketOrder, LimitOrder, ScannerSubscription
 import asyncio
 import os
 
@@ -12,91 +12,107 @@ class IbClient:
         if not self.ib.isConnected():
             try:
                 await self.ib.connectAsync("127.0.0.1", 4002, clientId=1, timeout=30)
-                print("✅ API Connected on 4002!")
+                print("API connected on 4002")
             except Exception as e:
-                print(f"❌ API connection failed: {e}")
+                print(f"API connection failed: {e}")
         else:
-            print("ℹ️ IBKR redan ansluten")
+            print("IBKR already connected")
+
+    async def _get_reference_price(self, contract):
+        price = None
+
+        try:
+            ticker = self.ib.reqMktData(contract, "", False, False)
+            await asyncio.sleep(1.5)
+
+            price = (
+                ticker.last
+                or ticker.marketPrice()
+                or ticker.close
+                or ticker.bid
+                or ticker.ask
+            )
+        except Exception:
+            price = None
+        finally:
+            try:
+                self.ib.cancelMktData(contract)
+            except Exception:
+                pass
+
+        try:
+            if price is not None:
+                price = float(price)
+                if price > 0:
+                    return price
+        except Exception:
+            pass
+
+        return None
 
     async def place_order(self, symbol, side, qty, bot=None, chat_id=None):
-        """
-        side: 'BUY' eller 'SELL'
-        qty: heltal antal
-        bot/chat_id: valfria, för att skicka status till Telegram
-        """
-        symbol = (symbol or "").upper().strip()
-
-        # IB gillar BRK B bättre än BRK-B
-        if symbol == "BRK-B":
-            symbol = "BRK B"
-
         contract = Stock(symbol, "SMART", "USD")
 
-        # Validera kontrakt innan order skickas
         try:
             qualified = await self.ib.qualifyContractsAsync(contract)
+            if not qualified:
+                print(f"Could not qualify contract for {symbol}")
+                return None
+            contract = qualified[0]
         except Exception as e:
-            print(f"❌ Kunde inte kvalificera kontrakt för {symbol}: {e}")
+            print(f"qualifyContracts failed for {symbol}: {e}")
             return None
 
-        if not qualified:
-            print(f"❌ Ingen giltig contract hittades för {symbol}")
-            return None
+        ref_price = await self._get_reference_price(contract)
 
-        contract = qualified[0]
-        order = MarketOrder(side, qty)
+        use_limit_orders = os.getenv("USE_LIMIT_ORDERS", "1").strip().lower() in {
+            "1", "true", "yes", "on"
+        }
 
-        try:
-            trade = await asyncio.to_thread(self.ib.placeOrder, contract, order)
-        except Exception as e:
-            print(f"❌ Kunde inte skicka order för {symbol}: {e}")
-            return None
+        if use_limit_orders and ref_price:
+            buy_buffer = float(os.getenv("BUY_LIMIT_BUFFER_PCT", "0.002"))
+            sell_buffer = float(os.getenv("SELL_LIMIT_BUFFER_PCT", "0.002"))
 
-        print(f"📨 Order skickad: {trade}")
+            if side.upper() == "BUY":
+                limit_price = round(ref_price * (1 + buy_buffer), 2)
+            else:
+                limit_price = round(ref_price * (1 - sell_buffer), 2)
 
-        def _send_msg(msg: str):
-            print(msg)
-            if bot and chat_id:
-                try:
-                    loop = asyncio.get_running_loop()
-                    loop.create_task(bot.send_message(chat_id=chat_id, text=msg))
-                except Exception as e:
-                    print(f"[telegram] fel: {e}")
+            order = LimitOrder(side.upper(), qty, limit_price)
+            print(
+                f"ORDER     {side.upper():<5} {symbol:<6} x{qty:<3} "
+                f"LIMIT   @ {limit_price:<8} ref={ref_price}"
+            )
+        else:
+            order = MarketOrder(side.upper(), qty)
+            print(
+                f"ORDER     {side.upper():<5} {symbol:<6} x{qty:<3} MARKET"
+            )
+
+        trade = self.ib.placeOrder(contract, order)
 
         def on_status(trade_):
-            try:
-                status = trade_.orderStatus.status or ""
-                filled = trade_.orderStatus.filled or 0
-                total = getattr(trade_.order, "totalQuantity", 0) or 0
-                msg = f"📊 Orderstatus {trade_.contract.symbol}: {status}, fylld {filled}/{total}"
-                _send_msg(msg)
-            except Exception as e:
-                print(f"[on_status] fel: {e}")
+            status = trade_.orderStatus.status
+            filled = trade_.orderStatus.filled
+            remaining = trade_.orderStatus.remaining
+            avg_fill = trade_.orderStatus.avgFillPrice
+            print(
+                f"STATUS    {symbol:<6} {status:<10} | "
+                f"filled={filled} | remaining={remaining} | avg_fill={avg_fill}"
+            )
 
         def on_filled(trade_):
-            try:
-                avg = float(trade_.orderStatus.avgFillPrice or 0.0)
-                filled = float(trade_.orderStatus.filled or 0.0)
-                total = float(getattr(trade_.order, "totalQuantity", 0) or 0)
-                sym = trade_.contract.symbol
-                msg = f"✅ {sym}: Filled {filled}/{total} @ {avg:.2f}"
-                _send_msg(msg)
-            except Exception as e:
-                print(f"[on_filled] fel: {e}")
+            avg_fill = trade_.orderStatus.avgFillPrice
+            print(f"FILLED    {symbol:<6} done       | avg_fill={avg_fill}")
 
         def on_fill(trade_, fill):
-            try:
-                sym = trade_.contract.symbol
-                px = float(getattr(fill.execution, "price", 0.0) or 0.0)
-                qty_ = float(getattr(fill.execution, "shares", 0.0) or 0.0)
-                cum = float(trade_.orderStatus.filled or 0.0)
-                total = float(getattr(trade_.order, "totalQuantity", 0) or 0)
-                msg = f"🧾 Fill {sym}: {qty_} @ {px} (cum {cum}/{total})"
-                _send_msg(msg)
-            except Exception as e:
-                print(f"[on_fill] fel: {e}")
+            execu = fill.execution
+            print(
+                f"FILL      {symbol:<6} {execu.side:<4} | "
+                f"shares={execu.shares} | price={execu.price}"
+            )
 
-        def _detach(trade_):
+        def _detach(trade_=None):
             try:
                 trade.statusEvent -= on_status
             except Exception:
@@ -110,11 +126,11 @@ class IbClient:
             except Exception:
                 pass
             try:
-                trade.cancelledEvent -= _detach
+                trade.filledEvent -= _detach
             except Exception:
                 pass
             try:
-                trade.filledEvent -= _detach
+                trade.cancelledEvent -= _detach
             except Exception:
                 pass
 
@@ -124,12 +140,11 @@ class IbClient:
         trade.filledEvent += _detach
         trade.cancelledEvent += _detach
 
-        # Vänta kort så vi hinner få direkt cancel på ogiltiga orders
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.75)
 
         status = (trade.orderStatus.status or "").lower()
         if status in {"cancelled", "inactive"}:
-            print(f"❌ Order avbruten direkt för {trade.contract.symbol}: {trade.orderStatus.status}")
+            print(f"Order cancelled immediately for {trade.contract.symbol}: {trade.orderStatus.status}")
             _detach(trade)
             return None
 
@@ -142,13 +157,11 @@ class IbClient:
         locationCode: str | None = None,
         scanCode: str | None = None,
     ):
-        # Läs defaults från .env om ej skickat in
         rows = rows or int(os.getenv("UNIVERSE_ROWS", "30"))
         instrument = instrument or os.getenv("SCANNER_INSTRUMENT", "STK")
         locationCode = locationCode or os.getenv("SCANNER_LOCATION", "STK.NASDAQ")
         scanCode = scanCode or os.getenv("SCANNER_CODE", "MOST_ACTIVE")
 
-        # liten paus så TWS hinner andas
         await asyncio.sleep(0.5)
 
         sub = ScannerSubscription(
@@ -159,10 +172,9 @@ class IbClient:
         )
         data = await self.ib.reqScannerDataAsync(sub)
         if not data:
-            print("⚠️ Ingen scanner-data returnerad.")
+            print("No scanner data returned")
             return []
 
-        # Plocka symboler (unika, behåll ordning)
         seen, tickers = set(), []
         for d in data:
             sym = d.contractDetails.contract.symbol
@@ -170,20 +182,20 @@ class IbClient:
                 seen.add(sym)
                 tickers.append(sym)
 
-        print(f"✅ Hämtade {len(tickers)} aktier: {tickers}")
+        print(f"Fetched {len(tickers)} symbols: {tickers}")
         return tickers
 
     async def scanner_parameters(self):
         scanner_xml = self.ib.reqScannerParameters()
         with open("scanner_parameters.xml", "w", encoding="utf-8") as f:
             f.write(scanner_xml)
-        print("✅ Scanner parameters saved!")
+        print("Scanner parameters saved")
 
     async def disconnect_ibkr(self):
         await asyncio.sleep(2)
         self.ib.disconnect()
-        print("❌ API Disconnected!")
+        print("API disconnected")
 
 
-# --- Global instans att återanvända ---
+# Global instans att återanvända
 ib_client = IbClient()

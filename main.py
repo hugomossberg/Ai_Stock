@@ -73,7 +73,7 @@ async def nyheter_cmd(update, context):
 async def main():
     # 1) IBKR
     await ib_client.connect()
-    log.info("✅ API Connected on %s!", TWS_PORT)
+    log.info("API Connected on %s!", TWS_PORT)
 
     # 2) Telegram-app (med timeouts)
     request = HTTPXRequest(
@@ -97,7 +97,7 @@ async def main():
     # 3) Schemalägg jobb
     setup_jobs(app, ib_client)
 
-    log.info("✅ API Connected on %s!", TWS_PORT)
+    log.info("API Connected on %s!", TWS_PORT)
 
     # 4) Kör boten
     await app.run_polling()

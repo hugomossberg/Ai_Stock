@@ -61,7 +61,7 @@ def load_state():
     state = {
         "hold_streak": {},
         "last_signal": {},
-        "universe": [],
+        "universe": [],  # används som aktivt scan_set
         "last_trade_ts": {},
         "buys_today": {},
         "sells_today": {},

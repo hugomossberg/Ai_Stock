@@ -28,7 +28,6 @@ def evaluate_entry(
     entry_score = 0
     reasons = []
 
-    # -------- Bas-säkerhet --------
     if price is None or sma20 is None or sma50 is None or rsi14 is None:
         return {
             "entry_score": -5,
@@ -37,101 +36,148 @@ def evaluate_entry(
             "entry_reasons": ["missing_core_technicals"],
         }
 
-    # -------- Trend / struktur --------
+    # ---------------------------
+    # Hårda stop-villkor först
+    # ---------------------------
+    if price <= sma20:
+        reasons.append("below_sma20_hard_block")
+    if sma20 < sma50:
+        reasons.append("below_trend_structure_hard_block")
+    if rsi14 > 78:
+        reasons.append("too_extended_hard_block")
+    if atr_pct is not None and atr_pct > 8:
+        reasons.append("too_volatile_hard_block")
+    if avg_dollar_volume_20 is not None and avg_dollar_volume_20 < 5_000_000:
+        reasons.append("too_illiquid_hard_block")
+
+    hard_blocks = {
+        "below_sma20_hard_block",
+        "below_trend_structure_hard_block",
+        "too_extended_hard_block",
+        "too_volatile_hard_block",
+        "too_illiquid_hard_block",
+    }
+
+    # ---------------------------
+    # Trend / struktur
+    # ---------------------------
     if price > sma20:
         entry_score += 2
         reasons.append("price_above_sma20")
     else:
-        entry_score -= 2
+        entry_score -= 3
         reasons.append("price_below_sma20")
 
     if sma20 >= sma50:
         entry_score += 2
         reasons.append("sma20_above_or_equal_sma50")
     else:
-        entry_score -= 2
+        entry_score -= 3
         reasons.append("sma20_below_sma50")
 
-    # -------- RSI --------
-    if 52 <= rsi14 <= 70:
+    # Bonus om pris ligger tydligt över trend
+    if price > sma20 and sma20 > sma50:
+        entry_score += 1
+        reasons.append("full_trend_alignment")
+
+    # ---------------------------
+    # RSI
+    # ---------------------------
+    if 54 <= rsi14 <= 68:
         entry_score += 2
         reasons.append("healthy_rsi")
-    elif 45 <= rsi14 < 52:
+    elif 50 <= rsi14 < 54:
         entry_score += 1
         reasons.append("acceptable_rsi")
-    elif 70 < rsi14 <= 78:
+    elif 68 < rsi14 <= 74:
         entry_score += 0
         reasons.append("slightly_extended_rsi")
+    elif 74 < rsi14 <= 78:
+        entry_score -= 1
+        reasons.append("extended_rsi")
     elif rsi14 > 78:
-        entry_score -= 2
+        entry_score -= 3
         reasons.append("too_extended_rsi")
-    elif rsi14 < 30:
+    elif rsi14 < 35:
         entry_score -= 2
         reasons.append("too_oversold_rsi")
 
-    # -------- Momentum --------
+    # ---------------------------
+    # Momentum
+    # ---------------------------
     if momentum_20 is not None:
-        if momentum_20 > 5:
+        if momentum_20 > 6:
             entry_score += 2
             reasons.append("strong_short_momentum")
-        elif momentum_20 > 0:
+        elif momentum_20 > 2:
             entry_score += 1
             reasons.append("positive_short_momentum")
-        elif momentum_20 < -6:
+        elif momentum_20 < -4:
             entry_score -= 2
             reasons.append("negative_short_momentum")
 
     if momentum_60 is not None:
-        if momentum_60 > 10:
+        if momentum_60 > 12:
             entry_score += 1
             reasons.append("strong_medium_momentum")
-        elif momentum_60 < -12:
+        elif momentum_60 < -10:
             entry_score -= 1
             reasons.append("weak_medium_momentum")
 
-    # -------- Volume confirmation --------
+    # ---------------------------
+    # Volume confirmation
+    # ---------------------------
     if volume_ratio is not None:
-        if volume_ratio >= 1.5:
+        if volume_ratio >= 1.8:
             entry_score += 2
             reasons.append("strong_volume_confirmation")
-        elif volume_ratio >= 1.1:
+        elif volume_ratio >= 1.2:
             entry_score += 1
             reasons.append("ok_volume_confirmation")
-        elif volume_ratio < 0.8:
+        elif volume_ratio < 0.85:
             entry_score -= 1
             reasons.append("weak_volume")
 
-    # -------- Volatilitet --------
+    # ---------------------------
+    # Volatilitet
+    # ---------------------------
     if atr_pct is not None:
-        if atr_pct < 2:
+        if atr_pct < 2.5:
             entry_score += 1
             reasons.append("controlled_volatility")
         elif atr_pct > 8:
-            entry_score -= 2
+            entry_score -= 3
             reasons.append("too_volatile")
         elif atr_pct > 6:
             entry_score -= 1
             reasons.append("high_volatility")
 
-    # -------- Likviditet --------
+    # ---------------------------
+    # Likviditet
+    # ---------------------------
     if avg_dollar_volume_20 is not None:
         if avg_dollar_volume_20 >= 20_000_000:
             entry_score += 1
             reasons.append("good_liquidity")
         elif avg_dollar_volume_20 < 5_000_000:
-            entry_score -= 2
+            entry_score -= 3
             reasons.append("poor_liquidity")
 
-    # -------- Profile-baserade justeringar --------
-    if candidate_quality == "A":
+    # ---------------------------
+    # Profile
+    # ---------------------------
+    if candidate_quality == "A+":
+        entry_score += 3
+        reasons.append("quality_A_plus")
+    elif candidate_quality == "A":
         entry_score += 2
         reasons.append("quality_A")
     elif candidate_quality == "B":
-        entry_score += 1
+        entry_score += 0
         reasons.append("quality_B")
-    elif candidate_quality == "D":
+    elif candidate_quality in {"C", "D"}:
         entry_score -= 2
-        reasons.append("quality_D")
+        reasons.append(f"quality_{candidate_quality}")
 
     if setup_type == "trend_continuation":
         entry_score += 2
@@ -146,7 +192,6 @@ def evaluate_entry(
         entry_score -= 2
         reasons.append("noise_setup")
 
-    # Risk flag-straff
     hard_risk_flags = {"missing_data", "thin_liquidity", "price_below_trend", "negative_news"}
     soft_risk_flags = {"extended_rsi", "overstretched", "high_volatility", "weak_financials", "oversold"}
 
@@ -156,15 +201,19 @@ def evaluate_entry(
         elif flag in soft_risk_flags:
             entry_score -= 1
 
-    # Bonus om total kandidat redan är stark
-    if candidate_score >= 8:
+    if candidate_score >= 10:
+        entry_score += 2
+        reasons.append("very_strong_candidate_score")
+    elif candidate_score >= 7:
         entry_score += 1
         reasons.append("strong_candidate_score")
     elif candidate_score <= 0:
         entry_score -= 2
         reasons.append("weak_candidate_score")
 
-    # -------- Timing / action --------
+    # ---------------------------
+    # Action
+    # ---------------------------
     timing_state = "watch_only"
     action = "watch"
 
@@ -172,23 +221,39 @@ def evaluate_entry(
         price < sma20 < sma50,
         rsi14 > 80,
         momentum_20 is not None and momentum_20 < -6,
-        "price_below_trend" in risk_flags and candidate_quality == "D",
+        "price_below_trend" in risk_flags and candidate_quality in {"C", "D"},
     ]
+
+    hard_block_count = sum(1 for r in reasons if r in hard_blocks)
+
     if any(sell_conditions):
         timing_state = "avoid"
         action = "sell_candidate"
 
-    elif entry_score >= 7 and candidate_quality in {"A", "B"}:
+    elif hard_block_count >= 2:
+        timing_state = "avoid"
+        action = "avoid"
+
+    elif (
+        entry_score >= 8
+        and candidate_quality in {"A+", "A", "B"}
+        and price > sma20
+        and sma20 >= sma50
+    ):
         timing_state = "ready"
         action = "buy_ready"
 
-    elif entry_score >= 4 and candidate_quality in {"A", "B", "C"}:
+    elif entry_score >= 7 and candidate_quality in {"A+", "A", "B"}:
         timing_state = "almost_ready"
         action = "watch"
 
-    elif entry_score >= 1:
+    elif entry_score >= 3:
         timing_state = "watch_only"
         action = "hold_candidate"
+
+    elif entry_score >= -1:
+        timing_state = "watch_only"
+        action = "watch"
 
     else:
         timing_state = "avoid"

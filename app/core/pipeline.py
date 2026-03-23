@@ -5,6 +5,8 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
+from app.core.logview import debug_log
+
 from app.config import (
     FINAL_CANDIDATES_PATH,
     PIPELINE_SNAPSHOT_PATH,
@@ -149,17 +151,17 @@ def _run_stage2(stage1_passed: list[dict]) -> list[dict]:
 def _run_stage3(stage2_passed: list[dict]) -> list[dict]:
     results = []
 
-    news_fetch_limit = 10
+    news_fetch_limit = 20
     try:
-        news_fetch_limit = int(os.getenv("PIPELINE_NEWS_FETCH_LIMIT", "10"))
+        news_fetch_limit = int(os.getenv("PIPELINE_NEWS_FETCH_LIMIT", "20"))
     except Exception:
-        news_fetch_limit = 10
+        news_fetch_limit = 20
 
-    news_items_limit = 3
+    news_items_limit = 5
     try:
-        news_items_limit = int(os.getenv("PIPELINE_NEWS_ITEMS", "3"))
+        news_items_limit = int(os.getenv("PIPELINE_NEWS_ITEMS", "5"))
     except Exception:
-        news_items_limit = 3
+        news_items_limit = 5
 
     for idx, item in enumerate(stage2_passed, start=1):
         stock = dict(item.get("stock") or {})
@@ -196,7 +198,8 @@ def _run_stage3(stage2_passed: list[dict]) -> list[dict]:
                 ((n.get("content") or {}).get("title") or "-")
                 for n in stock["News"][:2]
             ]
-            log.info(
+            debug_log(
+                log,
                 "[pipeline][NEWS] %-6s | items=%d | score=%+d | %s",
                 symbol,
                 len(stock.get("News", [])),
@@ -204,7 +207,8 @@ def _run_stage3(stage2_passed: list[dict]) -> list[dict]:
                 " || ".join(top_titles),
             )
         else:
-            log.info(
+            debug_log(
+                log,
                 "[pipeline][NEWS] %-6s | items=0 | score=%+d",
                 symbol,
                 news_score,
@@ -289,7 +293,7 @@ def _build_final_candidates(stage3_passed: list[dict], limit: int = 10) -> list[
             "name": name,
             "candidate_score": candidate_score,
             "entry_score": entry.get("entry_score", 0),
-            "final_score": candidate_score,
+            "final_score": candidate_score + int(entry.get("entry_score", 0) * 0.5),
             "signal": (
                 "Köp"
                 if entry.get("action") == "buy_ready"
@@ -348,7 +352,13 @@ async def run_pipeline(ib_client) -> dict:
     stage2 = _run_stage2(stage1_passed[:80])
     stage2_passed = [x for x in stage2 if x.get("passed")]
 
-    stage3_input = stage2_passed[:20]
+    stage3_limit = 40
+    try:
+        stage3_limit = int(os.getenv("PIPELINE_STAGE3_LIMIT", "40"))
+    except Exception:
+        stage3_limit = 40
+
+    stage3_input = stage2_passed[:stage3_limit]
     stage3 = _run_stage3(stage3_input)
     stage3_passed = [x for x in stage3 if x.get("passed")]
 
