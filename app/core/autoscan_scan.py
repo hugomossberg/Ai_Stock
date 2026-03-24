@@ -1,3 +1,4 @@
+#autoscan_scan.py
 from app.core.autoscan_shared import build_pipeline_analysis, quality_rank, to_float
 
 
@@ -45,19 +46,16 @@ def is_affordable(stock: dict, qty: int, max_order_value: float) -> bool:
 def is_allowed_replacement_action(action: str, held_pos: float = 0.0) -> bool:
     action = str(action or "").strip().lower()
 
-    if action in {"buy_ready", "watch", "hold_candidate", "hold_position"}:
+    # Endast kandidater som faktiskt kan vara vettiga att ha i scan set utan position
+    if action in {"buy_ready", "watch", "hold_candidate"}:
         return True
 
-    if action in {"review_needed", "exit_watch"} and held_pos <= 0:
-        return True
-
-    if action == "sell_candidate" and held_pos <= 0:
-        return True
-
-    if action == "exit_ready":
+    # hold_position hör hemma för ägda innehav, inte replacement-pool för nya scan-slots
+    if action == "hold_position":
         return held_pos > 0
 
-    if action == "avoid":
+    # review / exit-lägen ska inte fylla tomma scan-platser
+    if action in {"review_needed", "exit_watch", "sell_candidate", "exit_ready", "avoid"}:
         return False
 
     return False
@@ -198,25 +196,18 @@ def _replacement_profile(analysis: dict) -> str:
         return "stable"
 
     if (
-        action in {"watch", "hold_candidate", "buy_ready", "sell_candidate", "review_needed", "exit_watch"}
+        action in {"watch", "hold_candidate", "buy_ready"}
         and q_rank >= 2
         and retention >= 3
         and replacement_score >= 2
     ):
         return "fallback"
 
-    if (
-        action == "sell_candidate"
-        and q_rank >= 3
-        and retention >= 5
-        and replacement_score >= 3
-    ):
-        return "fallback"
-
     return "reject"
-
+    
 
 def _replacement_rank_tuple(analysis: dict) -> tuple:
+
     action = str(analysis.get("action") or "").strip().lower()
     return (
         1 if action == "buy_ready" else 0,

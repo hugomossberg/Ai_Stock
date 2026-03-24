@@ -1,3 +1,4 @@
+#autoscan.py
 import json
 import logging
 import os
@@ -317,7 +318,6 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
                 "presubmitted",
                 "submitted",
                 "pendingsubmit",
-                "pendingcancel",
             }
         }
     except Exception:
@@ -830,6 +830,72 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
             elif action == "exit_ready":
                 effective_signal = "Sälj"
 
+            if current_pos <= 0 and action in {"sell_candidate", "exit_ready", "exit_watch", "review_needed"}:
+                candidate_scan = [s for s in scan_set if s != sym]
+                repl = _take_replacement(candidate_scan, banned=removed_this_pass | {sym})
+
+                debug_log(
+                    log,
+                    "[FORCE-REPLACE] %s → invalid scan action without position | action=%s | score=%s | retention=%s",
+                    sym,
+                    action,
+                    score,
+                    retention_score,
+                )
+
+                if repl:
+                    if sym in scan_set:
+                        scan_set.remove(sym)
+
+                    removed.append(sym)
+                    removed_this_pass.add(sym)
+                    set_exclude_minutes(state, sym, pass_ex_min)
+                    reset_symbol_rotation_state(state, sym)
+
+                    scan_set.append(repl)
+                    scan_set = dedupe_keep_order(scan_set)[:universe_rows]
+                    added.append(repl)
+
+                    repl_raw = by_sym.get(repl) or {}
+                    log.info("[ADD] %s → force-replaces %s", repl, sym)
+
+                    rotations_out.append({
+                        "symbol": sym,
+                        "name": raw.get("name") or raw.get("companyName") or sym,
+                        "reason": f"invalid scan action without position: {action}",
+                    })
+
+                    rotations_in.append({
+                        "symbol": repl,
+                        "name": repl_raw.get("name") or repl_raw.get("companyName") or repl,
+                    })
+
+                    append_event(
+                        "rotation_out",
+                        symbol=sym,
+                        name=raw.get("name") or raw.get("companyName") or sym,
+                        reason=f"invalid scan action without position: {action}",
+                    )
+                    append_event(
+                        "rotation_in",
+                        symbol=repl,
+                        name=repl_raw.get("name") or repl_raw.get("companyName") or repl,
+                        reason=f"force-replaced {sym}",
+                    )
+                    continue
+
+                # ingen replacement finns -> stoppa symbolen från att fortsätta i denna pass
+                if sym in scan_set:
+                    scan_set.remove(sym)
+
+                removed.append(sym)
+                removed_this_pass.add(sym)
+                set_exclude_minutes(state, sym, pass_ex_min)
+                reset_symbol_rotation_state(state, sym)
+
+                log.info("[DROP-BAD] %s → removed, no valid replacement found", sym)
+                continue
+
             if effective_signal == "Sälj" and current_pos <= 0:
                 debug_log(
                     log,
@@ -1319,8 +1385,15 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
         orders=orders_for_report + owned_orders_for_report,
     )
 
+    final_scan_set = set(scan_set)
+
     state["watchlist"] = dedupe_keep_order(
-        [r["symbol"] for r in scan_results if str(r.get("action") or "").lower() == "watch"]
+        [
+            r["symbol"]
+            for r in scan_results
+            if r.get("symbol") in final_scan_set
+            and str(r.get("action") or "").lower() == "watch"
+        ]
     )
 
     save_state(state)
@@ -1339,12 +1412,43 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
         ]
         await bot.send_message(admin_chat_id, "\n".join(msg))
 
-    scan_watch_syms = [r["symbol"] for r in scan_results if str(r.get("action") or "").lower() == "watch"]
-    scan_hold_syms = [r["symbol"] for r in scan_results if str(r.get("action") or "").lower() == "hold_candidate"]
-    scan_buy_syms = [r["symbol"] for r in scan_results if str(r.get("action") or "").lower() == "buy_ready"]
-    scan_sell_syms = [r["symbol"] for r in scan_results if str(r.get("action") or "").lower() == "exit_ready"]
-    scan_exit_soon_syms = [r["symbol"] for r in scan_results if str(r.get("action") or "").lower() == "sell_candidate"]
-    scan_exit_watch_syms = [r["symbol"] for r in scan_results if str(r.get("action") or "").lower() == "exit_watch"]
+    final_scan_set = set(scan_set)
+
+    scan_watch_syms = [
+        r["symbol"] for r in scan_results
+        if r.get("symbol") in final_scan_set
+        and str(r.get("action") or "").lower() == "watch"
+    ]
+
+    scan_hold_syms = [
+        r["symbol"] for r in scan_results
+        if r.get("symbol") in final_scan_set
+        and str(r.get("action") or "").lower() == "hold_candidate"
+    ]
+
+    scan_buy_syms = [
+        r["symbol"] for r in scan_results
+        if r.get("symbol") in final_scan_set
+        and str(r.get("action") or "").lower() == "buy_ready"
+    ]
+
+    scan_sell_syms = [
+        r["symbol"] for r in scan_results
+        if r.get("symbol") in final_scan_set
+        and str(r.get("action") or "").lower() == "exit_ready"
+    ]
+
+    scan_exit_soon_syms = [
+        r["symbol"] for r in scan_results
+        if r.get("symbol") in final_scan_set
+        and str(r.get("action") or "").lower() == "sell_candidate"
+    ]
+
+    scan_exit_watch_syms = [
+        r["symbol"] for r in scan_results
+        if r.get("symbol") in final_scan_set
+        and str(r.get("action") or "").lower() == "exit_watch"
+    ]
 
     if state.get("watchlist"):
         debug_log(log, "[WATCHLIST] %s", ", ".join(state["watchlist"]))

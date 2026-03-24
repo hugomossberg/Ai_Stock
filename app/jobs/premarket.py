@@ -1,11 +1,15 @@
-#premarket.py
 import json
+import logging
 from datetime import datetime, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from app.core.scanner import rebuild_stock_info_for_premarket
 from app.core.signals import get_signal_analysis
 from app.core.helpers import send_long_message
 from app.data.fmp_client import FMPClient
+
+log = logging.getLogger("premarket")
 
 US_TZ = ZoneInfo("America/New_York")
 SE_TZ = ZoneInfo("Europe/Stockholm")
@@ -66,15 +70,29 @@ def _fetch_fmp_snapshot(ticker: str) -> dict:
 
 async def run_premarket_scan(bot, ib_client, admin_chat_id: int, want_ai: bool = True, open_ai=None):
     """
-    1) Läser positioner (IB)
-    2) Hämtar snabbdata + rubriker (FMP)
-    3) Kör signalanalys → Köp/Håll/Sälj
-    4) Skickar rapport i Telegram
-    5) (om want_ai & open_ai) AI-kommentar per ticker
+    Körs före öppning.
+    1) Bygger dagens stock_info.json fullt klart
+    2) Läser positioner (IB) om IB finns
+    3) Premarket-rapport på ägda innehav
     """
+
+    # Bygg ALLTID dagens stock_info först
+    try:
+        built = await rebuild_stock_info_for_premarket(ib_client=ib_client, limit=50)
+        if admin_chat_id:
+            await bot.send_message(
+                admin_chat_id,
+                f"Premarket: stock_info rebuild klar ({len(built)} rows)."
+            )
+    except Exception as e:
+        log.exception("Premarket rebuild fail")
+        if admin_chat_id:
+            await bot.send_message(admin_chat_id, f"Premarket: stock_info rebuild misslyckades ({e}).")
+
+    # Om IB saknas, stanna här efter rebuild
     if not ib_client or not ib_client.ib.isConnected():
         if admin_chat_id:
-            await bot.send_message(admin_chat_id, "Premarket: IBKR inte ansluten – hoppar.")
+            await bot.send_message(admin_chat_id, "Premarket: IBKR inte ansluten – hoppar innehavsanalys.")
         return
 
     positions = await ib_client.ib.reqPositionsAsync()
@@ -150,6 +168,7 @@ async def run_premarket_scan(bot, ib_client, admin_chat_id: int, want_ai: bool =
         await send_long_message(bot, admin_chat_id, "\n\n".join(ai_blocks))
 
     try:
+        Path("storage/reports").mkdir(parents=True, exist_ok=True)
         out = {
             "ts": datetime.now(timezone.utc).isoformat(),
             "rows": rows,
