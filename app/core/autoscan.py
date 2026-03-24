@@ -28,6 +28,7 @@ from app.core.autoscan_scan import (
     candidate_bucket,
     candidate_sort_key_factory,
     is_affordable,
+    replacement_bucket,
     replacement_is_meaningfully_better,
     should_rotate_candidate,
 )
@@ -676,10 +677,13 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
     entry_candidates = []
     watch_candidates = []
     fallback_candidates = []
+    replacement_candidates = []
 
     for sym in all_candidates:
         stock = by_sym.get(sym) or {}
+
         bucket = candidate_bucket(stock)
+        repl_bucket = replacement_bucket(stock)
 
         if bucket == "entry":
             entry_candidates.append(sym)
@@ -688,9 +692,13 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
         elif bucket == "fallback":
             fallback_candidates.append(sym)
 
+        if repl_bucket is not None:
+            replacement_candidates.append(sym)
+
     entry_candidates = sorted(entry_candidates, key=candidate_sort_key, reverse=True)
     watch_candidates = sorted(watch_candidates, key=candidate_sort_key, reverse=True)
     fallback_candidates = sorted(fallback_candidates, key=candidate_sort_key, reverse=True)
+    replacement_candidates = sorted(replacement_candidates, key=candidate_sort_key, reverse=True)
 
     tradable_entry_candidates = [
         s for s in entry_candidates
@@ -720,13 +728,15 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
     )
 
     all_candidates = dedupe_keep_order(all_candidates)
-    scan_seed = candidate_source[:]
 
+    # Viktigt: bara toppdelen ska vara scan-seed
+    scan_seed = candidate_source[:universe_rows]
+
+    # Viktigt: replacement-pool ska byggas från replacement-eligible kandidater,
+    # inte från hela raw all_candidates
     replacement_source = dedupe_keep_order(
-        [s for s in candidate_source if s not in scan_seed[:universe_rows]]
-        + [s for s in all_candidates if s not in scan_seed[:universe_rows]]
+        [s for s in replacement_candidates if s not in scan_seed]
     )
-
     debug_log(
         log,
         "[autoscan] FILTERED candidates | all=%d | entry=%d | tradable_entry=%d | watch=%d | fallback=%d | selected=%d | replacement_candidates=%d",
@@ -1030,6 +1040,14 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
                 and retention_score <= 6
             ):
                 drop_reason = f"replace due to watch_streak={effective_hold_streak}"
+            elif (
+                market_ok
+                and action == "hold_candidate"
+                and effective_hold_streak >= max(drop_if_hold_streak * 2, 12)
+                and current_pos <= 0
+                and retention_score <= 7
+            ):
+                drop_reason = f"replace due to stale_hold={effective_hold_streak}"
             elif score <= -3 and current_pos <= 0:
                 drop_reason = f"replace due to low score={score}"
 

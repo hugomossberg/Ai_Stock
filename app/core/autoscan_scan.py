@@ -36,6 +36,36 @@ def candidate_bucket(stock: dict) -> str | None:
     return None
 
 
+def replacement_bucket(stock: dict) -> str | None:
+    analysis = build_pipeline_analysis(stock or {})
+    action = str(analysis.get("action") or "").strip().lower()
+    quality = str(analysis.get("candidate_quality") or "").upper()
+    retention_score = int(analysis.get("retention_score", analysis.get("total_score", 0)) or 0)
+    replacement_score = int(analysis.get("replacement_score", analysis.get("total_score", 0)) or 0)
+    entry_score = int(analysis.get("entry_score", 0) or 0)
+
+    # Lite bredare än scan-bucket men fortfarande inte skräp
+    if (
+        action == "buy_ready"
+        and quality in {"A+", "A", "B", "C"}
+        and replacement_score >= 3
+        and entry_score >= 1
+    ):
+        return "upgrade"
+
+    if (
+        action in {"watch", "hold_candidate"}
+        and quality in {"A+", "A", "B", "C"}
+        and retention_score >= 1
+        and replacement_score >= 1
+    ):
+        return "stable"
+
+    return None
+
+
+
+
 def is_affordable(stock: dict, qty: int, max_order_value: float) -> bool:
     price = to_float((stock or {}).get("latestClose"), None)
     if price is None or price <= 0:
@@ -110,15 +140,31 @@ def replacement_is_meaningfully_better(
     current_retention = int(current_analysis.get("retention_score", current_analysis.get("total_score", 0)) or 0)
     current_quality = current_analysis.get("candidate_quality")
     current_action = str(current_analysis.get("action") or "").strip().lower()
+    current_q_rank = quality_rank(current_quality)
 
     repl_replacement_score = int(
         replacement_analysis.get("replacement_score", replacement_analysis.get("total_score", 0)) or 0
     )
     repl_quality = replacement_analysis.get("candidate_quality")
     repl_action = str(replacement_analysis.get("action") or "").strip().lower()
+    repl_q_rank = quality_rank(repl_quality)
 
+    # buy_ready ska fortfarande kunna ta en plats tydligt
     if repl_action == "buy_ready" and current_action not in {"buy_ready", "hold_position"}:
         return True
+
+    # Om nuvarande kandidat har blivit gammal/stale ska det vara lättare att rotera ut den
+    if current_action in {"watch", "hold_candidate"}:
+        if watch_streak >= 20:
+            return (
+                repl_q_rank >= max(2, current_q_rank - 1)
+                and repl_replacement_score >= current_retention - 2
+            )
+        if watch_streak >= 10:
+            return (
+                repl_q_rank >= max(2, current_q_rank - 1)
+                and repl_replacement_score >= current_retention - 1
+            )
 
     required_delta = required_replacement_delta(
         watch_streak=watch_streak,
@@ -130,7 +176,7 @@ def replacement_is_meaningfully_better(
     if repl_replacement_score >= current_retention + required_delta:
         return True
 
-    if quality_rank(repl_quality) > quality_rank(current_quality):
+    if repl_q_rank > current_q_rank:
         if repl_replacement_score >= current_retention + max(0, required_delta - 1):
             return True
 
@@ -177,34 +223,35 @@ def _replacement_profile(analysis: dict) -> str:
     replacement_score = int(analysis.get("replacement_score", total_score) or 0)
     entry_score = int(analysis.get("entry_score", 0) or 0)
 
+    # Stark replacement
     if (
         action == "buy_ready"
-        and q_rank >= 3
-        and replacement_score >= 6
-        and entry_score >= 3
-        and total_score >= 3
+        and q_rank >= 2
+        and replacement_score >= 3
+        and entry_score >= 1
+        and total_score >= 1
     ):
         return "upgrade"
 
+    # Bra nog att användas som vettig replacement
     if (
         action in {"watch", "hold_candidate", "buy_ready"}
         and q_rank >= 2
-        and retention >= 4
-        and replacement_score >= 4
-        and total_score >= 1
+        and retention >= 2
+        and replacement_score >= 2
     ):
         return "stable"
 
+    # Sista reservnivå
     if (
         action in {"watch", "hold_candidate", "buy_ready"}
         and q_rank >= 2
-        and retention >= 3
-        and replacement_score >= 2
+        and retention >= 1
+        and replacement_score >= 1
     ):
         return "fallback"
 
     return "reject"
-    
 
 def _replacement_rank_tuple(analysis: dict) -> tuple:
 

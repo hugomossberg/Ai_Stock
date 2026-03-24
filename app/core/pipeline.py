@@ -349,14 +349,20 @@ async def run_pipeline(ib_client) -> dict:
     stage1 = _run_stage1(universe)
     stage1_passed = [x for x in stage1 if x.get("passed")]
 
-    stage2 = _run_stage2(stage1_passed[:80])
+    stage2_limit = max(UNIVERSE_ROWS * 4, 120)
+    try:
+        stage2_limit = int(os.getenv("PIPELINE_STAGE2_LIMIT", str(stage2_limit)))
+    except Exception:
+        pass
+
+    stage2 = _run_stage2(stage1_passed[:stage2_limit])
     stage2_passed = [x for x in stage2 if x.get("passed")]
 
-    stage3_limit = 40
+    stage3_limit = max(UNIVERSE_ROWS * 4, 120)
     try:
-        stage3_limit = int(os.getenv("PIPELINE_STAGE3_LIMIT", "40"))
+        stage3_limit = int(os.getenv("PIPELINE_STAGE3_LIMIT", str(stage3_limit)))
     except Exception:
-        stage3_limit = 40
+        pass
 
     stage3_input = stage2_passed[:stage3_limit]
     stage3 = _run_stage3(stage3_input)
@@ -364,7 +370,7 @@ async def run_pipeline(ib_client) -> dict:
 
     final_candidates = _build_final_candidates(
         stage3_passed,
-        limit=max(UNIVERSE_ROWS * 5, 40)
+        limit=max(UNIVERSE_ROWS * 4, 100)
     )
 
     snapshot = {
