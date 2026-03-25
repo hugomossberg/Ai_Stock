@@ -508,6 +508,18 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
             row for row in portfolio_reviews
             if str(row.get("symbol") or "").upper().strip() != sym
         ]
+    
+    def _upsert_scan_result(row: dict):
+        symbol = str(row.get("symbol") or "").upper().strip()
+        if not symbol:
+            return
+
+        for idx, existing in enumerate(scan_results):
+            if str(existing.get("symbol") or "").upper().strip() == symbol:
+                scan_results[idx] = row
+                return
+
+        scan_results.append(row)
 
 
     def _sync_local_fill_state(sym: str, side: str, qty: int):
@@ -1320,7 +1332,7 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
         analysis_row["symbol"] = sym
         analysis_row["name"] = raw.get("name") or raw.get("companyName") or sym
         analysis_row["held_position"] = float(held.get(sym, 0.0))
-        scan_results.append(analysis_row)
+        _upsert_scan_result(analysis_row)
 
         if material_change:
             append_event(
@@ -1582,11 +1594,83 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
                 update_signal=False,
             )
             continue
-
+        
         current_pos = float(held.get(sym, 0.0))
         qty = auto_qty
         trade = None
         persist_signal = False
+        pretrade = None
+
+        # HARD-BLOCK ska ske före både autotrade och paper
+        if effective_signal == "Köp":
+            pretrade = await validate_pretrade_buy(
+                symbol=sym,
+                raw=raw,
+                analysis=analysis,
+                ib_client=ib_client,
+                qty=qty,
+                max_order_value=max_order_value,
+            )
+
+            if not pretrade.get("ok"):
+                log.info("[SKIP] %s → pretrade blocked | %s", sym, pretrade.get("reason"))
+
+                append_event(
+                    "buy_blocked_pretrade",
+                    symbol=sym,
+                    name=raw.get("name") or raw.get("companyName") or sym,
+                    data={
+                        "reason": pretrade.get("reason"),
+                        "quote": pretrade.get("quote"),
+                        "score": analysis.get("total_score"),
+                        "entry_score": analysis.get("entry_score"),
+                        "action": action,
+                    },
+                )
+
+                signal = "Håll"
+                effective_signal = "Håll"
+                action = "watch"
+                timing_state = "blocked"
+
+                analysis["signal"] = "Håll"
+                analysis["effective_signal"] = "Håll"
+                analysis["action"] = "watch"
+                analysis["timing_state"] = "blocked"
+                analysis["hard_blocked"] = True
+                analysis["hard_block_reason"] = pretrade.get("reason")
+                analysis["pretrade_blocked"] = True
+
+                curr_decision = build_decision_snapshot(
+                    signal=effective_signal,
+                    action=action,
+                    timing_state=timing_state,
+                    pressure=None,
+                    exit_mode="scan",
+                    exit_stage=0,
+                    score=score,
+                    retention_score=retention_score,
+                )
+
+                analysis_row["signal"] = "Håll"
+                analysis_row["effective_signal"] = "Håll"
+                analysis_row["action"] = "watch"
+                analysis_row["timing_state"] = "blocked"
+                analysis_row["hard_blocked"] = True
+                analysis_row["hard_block_reason"] = pretrade.get("reason")
+                analysis_row["pretrade_blocked"] = True
+
+                _upsert_scan_result(analysis_row)
+
+                _apply_symbol_state(
+                    state,
+                    sym,
+                    curr_decision,
+                    effective_signal,
+                    removed_this_pass,
+                    update_signal=True,
+                )
+                continue
 
         if autotrade_enabled and risk_ok and market_ok and not is_in_cooldown(state, sym, cooldown_min):
             action_signal = effective_signal
@@ -1626,7 +1710,7 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
                     update_signal=False,
                 )
                 continue
-            #
+
             if action_signal == "Köp" and current_pos <= 0 and max_total_open_positions > 0 and _long_position_count() >= max_total_open_positions:
                 log.info("[SKIP] %s → MAX_TOTAL_OPEN_POSITIONS reached", sym)
                 _apply_symbol_state(
@@ -1694,44 +1778,6 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
                 qty = min(auto_qty, int(current_pos))
                 if qty <= 0:
                     log.info("[SKIP] %s → no sellable position", sym)
-                    _apply_symbol_state(
-                        state,
-                        sym,
-                        curr_decision,
-                        effective_signal,
-                        removed_this_pass,
-                        update_signal=False,
-                    )
-                    continue
-
-            pretrade = None
-
-            if action_signal == "Köp":
-                pretrade = await validate_pretrade_buy(
-                    symbol=sym,
-                    raw=raw,
-                    analysis=analysis,
-                    ib_client=ib_client,
-                    qty=qty,
-                    max_order_value=max_order_value,
-                )
-
-                if not pretrade.get("ok"):
-                    log.info("[SKIP] %s → pretrade blocked | %s", sym, pretrade.get("reason"))
-
-                    append_event(
-                        "buy_blocked_pretrade",
-                        symbol=sym,
-                        name=raw.get("name") or raw.get("companyName") or sym,
-                        data={
-                            "reason": pretrade.get("reason"),
-                            "quote": pretrade.get("quote"),
-                            "score": analysis.get("total_score"),
-                            "entry_score": analysis.get("entry_score"),
-                            "action": action,
-                        },
-                    )
-
                     _apply_symbol_state(
                         state,
                         sym,
@@ -1955,8 +2001,6 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
                     f"price={raw_technicals.get('price')}, score={analysis.get('total_score')}, {','.join(why) or '-'})"
                 )
 
-        if sym in removed_this_pass:
-            continue
 
         _apply_symbol_state(
             state,
@@ -2075,6 +2119,7 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
         r["symbol"] for r in scan_results
         if r.get("symbol") in final_scan_set
         and str(r.get("action") or "").lower() == "buy_ready"
+        and not bool(r.get("hard_blocked"))
     ]
 
     scan_sell_syms = [
@@ -2155,7 +2200,7 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
         today_sell_total,
     )
 
-    top_buys = [r for r in scan_results if str(r.get("action") or "").lower() == "buy_ready"][:4]
+    top_buys = [r for r in scan_results if str(r.get("action") or "").lower() == "buy_ready" and not bool(r.get("hard_blocked")) ][:4]
     top_watch = [r for r in scan_results if str(r.get("action") or "").lower() == "watch"][:3]
     top_exit = [r for r in scan_results if str(r.get("action") or "").lower() in {"exit_ready", "sell_candidate", "exit_watch"}][:3]
     top_hold = [r for r in scan_results if str(r.get("action") or "").lower() == "hold_candidate"][:3]
