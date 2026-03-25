@@ -53,7 +53,14 @@ from app.core.autoscan_state import (
     state_counter,
     store_owned_snapshot,
 )
-from app.core.helpers import is_dup, kill_switch_ok, market_open_now, market_status_text_sv
+
+from app.core.helpers import (
+    get_market_session_info,
+    is_dup,
+    kill_switch_ok,
+    market_status_text_sv,
+)
+
 from app.core.logview import (
     _BLUE,
     _CYAN,
@@ -70,12 +77,15 @@ from app.core.logview import (
 from app.core.pipeline import run_pipeline
 from app.core.pretrade import validate_pretrade_buy
 from app.core.signals import execute_order
+
 from app.core.storage_utils import (
     append_event,
+    save_cycle_journal,
     save_daily_report,
     save_daily_snapshot,
     save_portfolio_review,
 )
+
 from app.core.universe_manager import (
     get_decision_state,
     get_exit_state,
@@ -423,10 +433,13 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
         getattr(ib_client, "pnl_realized_today", 0.0),
         getattr(ib_client, "pnl_unrealized_open", 0.0),
     )
-    market_ok = market_open_now()
+    market_info = get_market_session_info()
+    market_ok = bool(market_info["market_open"])
+    regular_market_ok = market_info["phase"] == "regular"
     sim_mode = sim_market
 
     log.info("[market] %s", market_status_text_sv())
+
     debug_log(log, "[autoscan] market_ok=%s risk_ok=%s risk_reason=%s", market_ok, risk_ok, risk_reason)
 
     added = []
@@ -1717,6 +1730,12 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
 
     state["universe"] = list(scan_set)
     replacement_pool_size = len(_available_replacements(scan_set, banned=removed_this_pass))
+    
+    final_scan_index = {sym: i for i, sym in enumerate(scan_set)}
+    final_scan_rows = sorted(
+        [r for r in scan_results if r.get("symbol") in final_scan_index],
+        key=lambda r: final_scan_index[r.get("symbol")],
+    )
 
     save_daily_snapshot(
         state=state,
@@ -1727,23 +1746,35 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
             "orders_buy": orders_buy,
             "orders_sell": orders_sell,
         },
-        scan_set=scan_results,
+        scan_set=final_scan_rows,
         portfolio=portfolio_reviews,
         market_open=market_ok,
     )
 
     save_portfolio_review(portfolio_reviews)
 
-    save_daily_report(
+    save_cycle_journal(
         market_open=market_ok,
+        market_info=market_info,
         universe_size=len(by_sym),
-        scan_set=scan_results,
+        scan_set=final_scan_rows,
         replacement_pool_size=replacement_pool_size,
+        portfolio=portfolio_reviews,
         rotations_out=rotations_out,
         rotations_in=rotations_in,
         orders=orders_for_report + owned_orders_for_report,
     )
 
+    save_daily_report(
+        market_open=market_ok,
+        market_info=market_info,
+        universe_size=len(by_sym),
+        scan_set=final_scan_rows,
+        replacement_pool_size=replacement_pool_size,
+        rotations_out=rotations_out,
+        rotations_in=rotations_in,
+        orders=orders_for_report + owned_orders_for_report,
+    )
     final_scan_set = set(scan_set)
 
     state["watchlist"] = dedupe_keep_order(

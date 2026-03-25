@@ -2,15 +2,12 @@
 import os
 from pathlib import Path
 
-from pathlib import Path
-import os
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 load_dotenv(dotenv_path=BASE_DIR / ".env")
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip().replace("\ufeff", "")
-TWS_PORT = int(os.getenv("TWS_PORT", "4002"))
+
 
 
 def env_bool(key: str, default: bool = False) -> bool:
@@ -48,7 +45,7 @@ REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
 # ===== JSON files =====
 STATE_PATH = Path(os.getenv("STATE_PATH", str(STATE_DIR / "trade_state.json")))
-SIGNAL_LOG_PATH = Path(os.getenv("SIGNAL_LOG_PATH", str(STATE_DIR / "signal_log.json")))
+SIGNAL_LOG_PATH = Path(os.getenv("SIGNAL_LOG_PATH", str(STATE_DIR / "signal_log.jsonl")))
 STOCK_INFO_PATH = Path(os.getenv("STOCK_INFO_PATH", str(STATE_DIR / "stock_info.json")))
 PIPELINE_SNAPSHOT_PATH = Path(os.getenv("PIPELINE_SNAPSHOT_PATH", str(STATE_DIR / "pipeline_snapshot.json")))
 FINAL_CANDIDATES_PATH = Path(os.getenv("FINAL_CANDIDATES_PATH", str(STATE_DIR / "final_candidates.json")))

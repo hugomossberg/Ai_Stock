@@ -1,4 +1,5 @@
 import json
+import os
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,7 +36,7 @@ def _normalize_stock(stock: dict) -> dict:
     s["trailingEps"] = _to_float(s.get("trailingEps"), 0.0)
     s["dividendYield"] = _to_float(s.get("dividendYield"), 0.0)
     return s
-
+import os
 
 def _fetch_fmp_snapshot(ticker: str) -> dict:
     quote = fmp.quote_short(ticker) or {}
@@ -77,7 +78,9 @@ async def run_premarket_scan(bot, ib_client, admin_chat_id: int, want_ai: bool =
     """
 
     try:
-        built = await rebuild_stock_info_for_premarket(ib_client=ib_client, limit=50)
+
+        limit = int(os.getenv("PREMARKET_REBUILD_LIMIT", "300"))
+        built = await rebuild_stock_info_for_premarket(ib_client=ib_client, limit=limit)
         if bot and admin_chat_id:
             await bot.send_message(
                 admin_chat_id,

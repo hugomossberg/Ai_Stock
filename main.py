@@ -84,9 +84,6 @@ async def main():
         connection_pool_size=50,
     )
 
-    print("DEBUG TOKEN FOUND:", bool(TELEGRAM_TOKEN))
-    print("DEBUG TOKEN LEN:", len(TELEGRAM_TOKEN) if TELEGRAM_TOKEN else None)
-    print("DEBUG TOKEN REPR:", repr(TELEGRAM_TOKEN[:20]) if TELEGRAM_TOKEN else None)
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).request(request).build()
 
     # Dela resurser

@@ -8,6 +8,36 @@ from typing import Any
 from app.config import EVENTS_DIR, REPORTS_DIR, SNAPSHOT_DIR
 
 
+
+
+def _market_lines(market_info: dict | None = None) -> list[str]:
+    if not market_info:
+        return [
+            "Market phase       : -",
+            "Swedish time       : -",
+            "US market time     : -",
+            "Session open       : -",
+            "Regular market     : -",
+        ]
+
+    now_market = market_info.get("now_market")
+    now_sweden = market_info.get("now_sweden")
+    phase_sv = market_info.get("phase_sv", "-")
+    phase = market_info.get("phase", "-")
+    session_open = "JA" if market_info.get("market_open") else "NEJ"
+    regular_open = "JA" if phase == "regular" else "NEJ"
+
+    us_txt = now_market.strftime("%Y-%m-%d %H:%M:%S %Z") if now_market else "-"
+    se_txt = now_sweden.strftime("%Y-%m-%d %H:%M:%S %Z") if now_sweden else "-"
+
+    return [
+        f"Market phase       : {phase_sv} ({phase})",
+        f"Swedish time       : {se_txt}",
+        f"US market time     : {us_txt}",
+        f"Session open       : {session_open}",
+        f"Regular market     : {regular_open}",
+    ]
+
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -45,6 +75,12 @@ def get_report_path(dt: datetime | None = None) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     return path / daily_filename(dt, ".txt")
 
+def get_journal_path(dt: datetime | None = None) -> Path:
+    dt = dt or now_utc()
+    path = REPORTS_DIR / year_folder(dt) / week_folder(dt)
+    path.mkdir(parents=True, exist_ok=True)
+    return path / (dt.strftime("%Y-%m-%d") + "_journal.txt")
+
 
 def atomic_json_write(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -67,6 +103,10 @@ def overwrite_text(path: Path, content: str) -> None:
         f.write(content)
     os.replace(tmp_path, path)
 
+def append_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(content)
 
 def append_event(
     event_type: str,
@@ -187,6 +227,7 @@ def build_daily_report(
     *,
     dt: datetime,
     market_open: bool,
+    market_info: dict | None = None,
     universe_size: int,
     scan_set: list[dict],
     replacement_pool_size: int,
@@ -198,21 +239,24 @@ def build_daily_report(
     rotations_in = rotations_in or []
     orders = orders or []
 
+
     buy_rows = [
         row for row in scan_set
-        if _signal_label(row.get("signal", "")) in {"KÖP", "BUY"}
+        if str(row.get("action") or "").strip().lower() == "buy_ready"
     ]
+
     hold_rows = [
         row for row in scan_set
-        if _signal_label(row.get("signal", "")) in {"HÅLL", "HOLD"}
+        if str(row.get("action") or "").strip().lower() == "hold_candidate"
     ]
 
     lines: list[str] = []
     lines.append("=" * 60)
     lines.append("TRADING BOT DAILY REPORT")
-    lines.append(f"Date: {dt.strftime('%Y-%m-%d')}")
-    lines.append(f"Time: {dt.strftime('%H:%M:%S UTC')}")
-    lines.append(f"Market open: {'YES' if market_open else 'NO'}")
+    lines.append(f"Log date UTC: {dt.strftime('%Y-%m-%d')}")
+    lines.append(f"Log time UTC: {dt.strftime('%H:%M:%S UTC')}")
+    for line in _market_lines(market_info):
+        lines.append(line)
     lines.append(f"Universe size: {universe_size}")
     lines.append(f"Scan set size: {len(scan_set)}")
     lines.append(f"Replacement pool: {replacement_pool_size}")
@@ -281,9 +325,140 @@ def build_daily_report(
     return "\n".join(lines) + "\n"
 
 
+def build_cycle_journal(
+    *,
+    dt: datetime,
+    market_open: bool,
+    market_info: dict | None = None,
+    universe_size: int,
+    scan_set: list[dict],
+    replacement_pool_size: int,
+    portfolio: list[dict] | None = None,
+    rotations_out: list[dict] | None = None,
+    rotations_in: list[dict] | None = None,
+    orders: list[str] | None = None,
+) -> str:
+    portfolio = portfolio or []
+    rotations_out = rotations_out or []
+    rotations_in = rotations_in or []
+    orders = orders or []
+
+    buy_rows = [
+        row for row in scan_set
+        if str(row.get("action") or "").strip().lower() == "buy_ready"
+    ]
+
+    watch_rows = [
+        row for row in scan_set
+        if str(row.get("action") or "").strip().lower() == "watch"
+    ]
+
+    hold_rows = [
+        row for row in scan_set
+        if str(row.get("action") or "").strip().lower() == "hold_candidate"
+    ]
+
+    lines: list[str] = []
+    lines.append("=" * 70)
+    lines.append("AUTOSCAN JOURNAL")
+
+    lines.append("=" * 70)
+    for line in _market_lines(market_info):
+        lines.append(line)
+    lines.append(f"Log timestamp UTC  : {dt.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    lines.append(f"Universe size      : {universe_size}")
+
+    lines.append(f"Scan set size      : {len(scan_set)}")
+    lines.append(f"Replacement pool   : {replacement_pool_size}")
+    lines.append(f"Portfolio rows     : {len(portfolio)}")
+    lines.append("")
+
+    lines.append("HELD / PORTFOLIO REVIEW")
+    if portfolio:
+        for row in portfolio:
+            sym = row.get("symbol", "?")
+            signal = row.get("signal", "-")
+            action = row.get("action", "-")
+            quality = row.get("candidate_quality", row.get("quality", "-"))
+            score = row.get("entry_score", row.get("score", "-"))
+            timing = row.get("timing_state", "-")
+            exit_reason = row.get("exit_reason", "-")
+            lines.append(
+                f"- {sym:6} | signal={signal} | action={action} | "
+                f"quality={quality} | score={score} | timing={timing} | exit={exit_reason}"
+            )
+    else:
+        lines.append("- None")
+    lines.append("")
+
+    lines.append("BUY READY")
+    if buy_rows:
+        for row in buy_rows:
+            lines.append(
+                f"- {row.get('symbol', '?'):6} | "
+                f"score={row.get('total_score', 'n/a')} | "
+                f"quality={row.get('candidate_quality', '-')} | "
+                f"timing={row.get('timing_state', '-')}"
+            )
+    else:
+        lines.append("- None")
+    lines.append("")
+
+    lines.append("WATCH")
+    if watch_rows:
+        for row in watch_rows:
+            lines.append(
+                f"- {row.get('symbol', '?'):6} | "
+                f"score={row.get('total_score', 'n/a')} | "
+                f"timing={row.get('timing_state', '-')}"
+            )
+    else:
+        lines.append("- None")
+    lines.append("")
+
+    lines.append("HOLD")
+    if hold_rows:
+        for row in hold_rows:
+            lines.append(f"- {row.get('symbol', '?')}")
+    else:
+        lines.append("- None")
+    lines.append("")
+
+    lines.append("ROTATION OUT")
+    if rotations_out:
+        for row in rotations_out:
+            lines.append(
+                f"- {row.get('symbol', '?')} | reason={row.get('reason', 'rule triggered')}"
+            )
+    else:
+        lines.append("- None")
+    lines.append("")
+
+    lines.append("ROTATION IN")
+    if rotations_in:
+        for row in rotations_in:
+            lines.append(f"- {row.get('symbol', '?')}")
+    else:
+        lines.append("- None")
+    lines.append("")
+
+    lines.append("ORDERS")
+    if orders:
+        for order in orders:
+            lines.append(f"- {order}")
+    else:
+        lines.append("- None")
+    lines.append("")
+    lines.append("")
+
+    return "\n".join(lines)
+
+
+
 def save_daily_report(
     *,
     market_open: bool,
+    market_info: dict | None = None,
     universe_size: int,
     scan_set: list[dict],
     replacement_pool_size: int,
@@ -295,6 +470,7 @@ def save_daily_report(
     report = build_daily_report(
         dt=dt,
         market_open=market_open,
+        market_info=market_info,
         universe_size=universe_size,
         scan_set=scan_set,
         replacement_pool_size=replacement_pool_size,
@@ -304,4 +480,34 @@ def save_daily_report(
     )
     path = get_report_path(dt)
     overwrite_text(path, report)
+    return path
+
+
+def save_cycle_journal(
+    *,
+    market_open: bool,
+    market_info: dict | None = None,
+    universe_size: int,
+    scan_set: list[dict],
+    replacement_pool_size: int,
+    portfolio: list[dict] | None = None,
+    rotations_out: list[dict] | None = None,
+    rotations_in: list[dict] | None = None,
+    orders: list[str] | None = None,
+) -> Path:
+    dt = now_utc()
+    journal = build_cycle_journal(
+        dt=dt,
+        market_open=market_open,
+        market_info=market_info,
+        universe_size=universe_size,
+        scan_set=scan_set,
+        replacement_pool_size=replacement_pool_size,
+        portfolio=portfolio,
+        rotations_out=rotations_out,
+        rotations_in=rotations_in,
+        orders=orders,
+    )
+    path = get_journal_path(dt)
+    append_text(path, journal)
     return path
