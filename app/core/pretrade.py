@@ -80,7 +80,6 @@ async def validate_pretrade_buy(
     if not live_price or live_price <= 0:
         return {"ok": False, "reason": "no_live_price", "quote": quote}
 
-    # FMP har normalt inte riktig bid/ask, så default ska vara AV här
     require_bid_ask = os.getenv("PRETRADE_REQUIRE_BID_ASK", "0").strip().lower() in {
         "1", "true", "yes", "on"
     }
@@ -88,11 +87,11 @@ async def validate_pretrade_buy(
     if require_bid_ask and (bid is None or ask is None):
         return {"ok": False, "reason": "missing_bid_ask", "quote": quote}
 
-    max_spread_pct = _env_float("PRETRADE_MAX_SPREAD_PCT", 0.35)
-    max_drift_pct = _env_float("PRETRADE_MAX_DRIFT_PCT", 1.00)
-    max_distance_sma20_pct = _env_float("PRETRADE_MAX_DISTANCE_SMA20_PCT", 4.0)
-    max_rsi_buy = _env_float("PRETRADE_MAX_RSI_BUY", 76.0)
-    min_volume_ratio_buy = _env_float("PRETRADE_MIN_VOLUME_RATIO_BUY", 0.90)
+    max_spread_pct = _env_float("PRETRADE_MAX_SPREAD_PCT", 0.60)
+    max_drift_pct = _env_float("PRETRADE_MAX_DRIFT_PCT", 1.50)
+    max_distance_sma20_pct = _env_float("PRETRADE_MAX_DISTANCE_SMA20_PCT", 8.0)
+    max_rsi_buy = _env_float("PRETRADE_MAX_RSI_BUY", 78.0)
+    min_volume_ratio_buy = _env_float("PRETRADE_MIN_VOLUME_RATIO_BUY", 0.45)
     max_atr_pct_buy = _env_float("PRETRADE_MAX_ATR_PCT_BUY", 8.0)
 
     if spread_pct is not None and spread_pct > max_spread_pct:
