@@ -3,7 +3,6 @@ from datetime import datetime, timedelta
 
 from app.core.autoscan_shared import now_utc
 
-
 def ensure_state_defaults(state: dict) -> dict:
     state.setdefault("last_signal", {})
     state.setdefault("exclude_until", {})
@@ -17,8 +16,8 @@ def ensure_state_defaults(state: dict) -> dict:
     state.setdefault("scan_pass_seen", {})
     state.setdefault("last_global_buy_ts", None)
     state.setdefault("last_global_sell_ts", None)
+    state.setdefault("pretrade_blocked", {})
     return state
-
 
 def state_counter(state: dict, bucket: str, sym: str, today: str) -> dict:
     rec = state.get(bucket, {}).get(sym, {"date": today, "count": 0})

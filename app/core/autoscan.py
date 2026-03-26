@@ -682,10 +682,28 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
 
         if current_pos > 0:
             if missing_from_pipeline:
-                pressure = "healthy"
-                effective_signal = "Håll"
-                exit_mode = "hold"
-                owned_reason = "missing_from_pipeline_neutral"
+                missing_count = int(analysis.get("missing_from_pipeline_count", 0) or 0)
+
+                if missing_count >= 10:
+                    pressure = "bearish"
+                    effective_signal = "Sälj"
+                    exit_mode = "full"
+                    owned_reason = "missing_from_pipeline_hard_exit"
+                elif missing_count >= 6:
+                    pressure = "warning"
+                    effective_signal = "Håll"
+                    exit_mode = "watch"
+                    owned_reason = "missing_from_pipeline_exit_soon"
+                elif missing_count >= 3:
+                    pressure = "warning"
+                    effective_signal = "Håll"
+                    exit_mode = "watch"
+                    owned_reason = "missing_from_pipeline_exit_watch"
+                else:
+                    pressure = "healthy"
+                    effective_signal = "Håll"
+                    exit_mode = "hold"
+                    owned_reason = "missing_from_pipeline_neutral"
             else:
                 pressure = classify_exit_pressure(analysis, current_pos)
                 exit_state = advance_long_exit_state(exit_state, analysis, pressure)
@@ -1082,6 +1100,21 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
         if is_affordable(by_sym.get(s) or {}, auto_qty, max_order_value)
     ]
 
+    tradable_watch_candidates = [
+        s for s in watch_candidates
+        if is_affordable(by_sym.get(s) or {}, auto_qty, max_order_value)
+    ]
+
+    tradable_fallback_candidates = [
+        s for s in fallback_candidates
+        if is_affordable(by_sym.get(s) or {}, auto_qty, max_order_value)
+    ]
+
+    tradable_replacement_candidates = [
+        s for s in replacement_candidates
+        if is_affordable(by_sym.get(s) or {}, auto_qty, max_order_value)
+    ]
+
     non_tradable_entry_candidates = [
         s for s in entry_candidates if s not in tradable_entry_candidates
     ]
@@ -1096,64 +1129,23 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
         len(fallback_candidates),
     )
 
-    for s in non_tradable_entry_candidates[:20]:
-        stock = by_sym.get(s) or {}
-        price = to_float(stock.get("latestClose"), 0) or to_float(
-            ((stock.get("_pipeline_technicals") or {}).get("price")),
-            0,
-        )
-        est_value = (price or 0) * auto_qty
-        log.info(
-            "[autoscan] ENTRY BLOCKED | %s | price=%.2f | qty=%s | est=%.2f | max=%.2f",
-            s,
-            price or 0.0,
-            auto_qty,
-            est_value,
-            max_order_value,
-        )
-
-    for s in non_tradable_entry_candidates[:10]:
-        stock = by_sym.get(s) or {}
-        price = to_float(stock.get("latestClose"), 0) or to_float(
-            ((stock.get("_pipeline_technicals") or {}).get("price")),
-            0,
-        )
-        est_value = (price or 0) * auto_qty
-        debug_log(
-            log,
-            "[ENTRY-SKIP] %s → not affordable | price=%.2f qty=%s est=%.2f max=%.2f",
-            s,
-            price or 0.0,
-            auto_qty,
-            est_value,
-            max_order_value,
-        )
-
     candidate_source = dedupe_keep_order(
         tradable_entry_candidates
-        + watch_candidates
-        + fallback_candidates
+        + tradable_watch_candidates
+        + tradable_fallback_candidates
     )
 
-    if not candidate_source and all_candidates:
+    if not candidate_source:
         log.warning(
-            "[autoscan] candidate_source became empty after affordability/filtering. "
-            "Falling back to raw entry/watch/fallback candidates."
+            "[autoscan] candidate_source empty after affordability filtering"
         )
-        candidate_source = dedupe_keep_order(
-            entry_candidates
-            + watch_candidates
-            + fallback_candidates
-        )
-            
-  
 
     all_candidates = dedupe_keep_order(all_candidates)
 
     scan_seed = candidate_source[:universe_rows]
 
     replacement_source = dedupe_keep_order(
-        [s for s in replacement_candidates if s not in scan_seed]
+        [s for s in tradable_replacement_candidates if s not in scan_seed]
     )
 
     debug_log(
@@ -1168,6 +1160,7 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
         len(replacement_source),
     )
 
+    
     prev_uni = [s.upper() for s in state.get("universe", []) if s]
 
     if not candidate_source:
@@ -1196,9 +1189,40 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
         if sym not in removed:
             removed.append(sym)
 
+        raw_pre = by_sym.get(sym) or {}
+        removed_this_pass.add(sym)
+        reset_symbol_rotation_state(state, sym)
+
+        rotations_out.append({
+            "symbol": sym,
+            "name": raw_pre.get("name") or raw_pre.get("companyName") or sym,
+            "reason": "pre-rotation from rotate_universe",
+        })
+
+        append_event(
+            "rotation_out",
+            symbol=sym,
+            name=raw_pre.get("name") or raw_pre.get("companyName") or sym,
+            reason="pre-rotation from rotate_universe",
+        )
+
     for sym in added_pre:
         if sym not in added:
             added.append(sym)
+
+        raw_pre = by_sym.get(sym) or {}
+
+        rotations_in.append({
+            "symbol": sym,
+            "name": raw_pre.get("name") or raw_pre.get("companyName") or sym,
+        })
+
+        append_event(
+            "rotation_in",
+            symbol=sym,
+            name=raw_pre.get("name") or raw_pre.get("companyName") or sym,
+            reason="pre-rotation into scan_set",
+        )
 
     def _available_replacements(current_scan, banned=None):
         pool, reason_counts = available_replacements(
@@ -1209,6 +1233,8 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
             held=held,
             open_buy_syms=open_buy_syms,
             is_excluded_fn=lambda s: is_excluded(state, s),
+            qty=auto_qty,
+            max_order_value=max_order_value,
             banned=banned or set(),
         )
         debug_log(log, "[REPL-DEBUG] %s", reason_counts)
@@ -1451,19 +1477,7 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
                     "changed_fields": changed_fields,
                 },
             )
-
-        if effective_signal == "Köp" and prev_decision.get("signal") != "Köp":
-            append_event(
-                "buy_signal",
-                symbol=sym,
-                name=raw.get("name") or raw.get("companyName") or sym,
-                data={
-                    "score": analysis.get("total_score"),
-                    "price": raw_technicals.get("price"),
-                    "event_kind": "new_buy_signal",
-                },
-            )
-
+            
         if sym == "BRK-B" and not raw_technicals.get("price"):
             debug_log(log, "[KEEP] %s → IB technicals still missing, temporarily kept", sym)
             _apply_symbol_state(
@@ -1490,6 +1504,11 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
 
         drop_reason = None
         hold_streak = int(state.get("hold_streak", {}).get(sym, 0))
+
+        blocked_rec = (state.get("pretrade_blocked", {}) or {}).get(sym, {})
+        blocked_count = int(blocked_rec.get("count", 0) or 0)
+        blocked_reason = str(blocked_rec.get("reason") or "")
+
         effective_hold_streak = hold_streak + 1 if effective_signal == "Håll" else 0
 
         rotate_by_profile, rotate_reason = should_rotate_candidate(
@@ -1502,9 +1521,22 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
         if entry_mode == "buy_only":
             if action != "buy_ready":
                 drop_reason = f"replace due to action={action}"
+
         elif entry_mode == "all":
             if rotate_by_profile:
                 drop_reason = rotate_reason
+            elif (
+                market_ok
+                and current_pos <= 0
+                and blocked_count >= 3
+                and blocked_reason.startswith((
+                    "volume_ratio_too_low",
+                    "too_extended_vs_sma20",
+                    "order_value_too_large",
+                    "price_drift_too_large",
+                ))
+            ):
+                drop_reason = f"replace due to repeated_pretrade_block={blocked_count}:{blocked_reason}"
             elif (
                 market_ok
                 and action == "watch"
@@ -1710,6 +1742,7 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
         persist_signal = False
         pretrade = None
 
+
         # HARD-BLOCK ska ske före både autotrade och paper
         if effective_signal == "Köp":
             pretrade = await validate_pretrade_buy(
@@ -1721,7 +1754,21 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
                 max_order_value=max_order_value,
             )
 
+            if pretrade.get("ok"):
+                state.setdefault("pretrade_blocked", {}).pop(sym, None)
+
             if not pretrade.get("ok"):
+                state.setdefault("pretrade_blocked", {})
+                prev_block = state["pretrade_blocked"].get(sym) or {}
+                new_reason = str(pretrade.get("reason") or "")
+                same_reason = str(prev_block.get("reason") or "") == new_reason
+
+                state["pretrade_blocked"][sym] = {
+                    "count": (int(prev_block.get("count", 0) or 0) + 1) if same_reason else 1,
+                    "reason": new_reason,
+                    "updated_at": now_utc().isoformat(),
+                }
+
                 log.info(
                     "[BUY BLOCKED] %s | reason=%s | action=%s | timing=%s | entry_score=%s | final_score=%s",
                     sym,
@@ -1788,6 +1835,24 @@ async def run_autoscan_once(bot, ib_client, admin_chat_id: int):
                     update_signal=True,
                 )
                 continue
+
+        if (
+            effective_signal == "Köp"
+            and prev_decision.get("signal") != "Köp"
+            and (pretrade is None or pretrade.get("ok"))
+        ):
+            append_event(
+                "buy_signal",
+                symbol=sym,
+                name=raw.get("name") or raw.get("companyName") or sym,
+                data={
+                    "score": analysis.get("total_score"),
+                    "price": raw_technicals.get("price"),
+                    "event_kind": "new_buy_signal_after_pretrade",
+                },
+            )
+
+
 
         if autotrade_enabled and risk_ok and market_ok and not is_in_cooldown(state, sym, cooldown_min):
             action_signal = effective_signal

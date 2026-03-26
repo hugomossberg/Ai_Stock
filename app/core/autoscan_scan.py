@@ -266,7 +266,6 @@ def _replacement_rank_tuple(analysis: dict) -> tuple:
         int(analysis.get("total_score", 0) or 0),
     )
 
-
 def available_replacements(
     *,
     current_scan: list[str],
@@ -276,6 +275,8 @@ def available_replacements(
     held: dict,
     open_buy_syms: set[str],
     is_excluded_fn,
+    qty: int,
+    max_order_value: float,
     banned: set[str] | None = None,
 ) -> tuple[list[str], dict]:
     banned = banned or set()
@@ -290,6 +291,7 @@ def available_replacements(
         "bad_action": 0,
         "weak_profile": 0,
         "accepted": 0,
+        "not_affordable": 0,
     }
 
     upgrade_pool: list[str] = []
@@ -312,6 +314,10 @@ def available_replacements(
         if is_excluded_fn(s):
             reason_counts["excluded"] += 1
             continue
+        if not is_affordable(by_sym.get(s) or {}, qty, max_order_value):
+            reason_counts["not_affordable"] += 1
+            continue
+
 
         analysis = analysis_cache.get(s) or build_pipeline_analysis(by_sym.get(s) or {})
         action = str(analysis.get("action") or "").strip().lower()
